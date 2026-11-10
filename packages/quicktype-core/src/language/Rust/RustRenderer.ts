@@ -421,7 +421,10 @@ export class RustRenderer extends ConvenienceRenderer {
         }
 
         this.ensureBlankLine();
-        this.emitLine("use serde::{Serialize, Deserialize};");
+        // Only declared types derive Serialize/Deserialize; aliases don't.
+        if (this.haveNamedTypes) {
+            this.emitLine("use serde::{Serialize, Deserialize};");
+        }
 
         if (this.haveMaps) {
             this.emitLine("use std::collections::HashMap;");

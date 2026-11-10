@@ -24,11 +24,12 @@ async function renderTypeScriptSchema(definitions: object): Promise<string> {
 
 // TypeScript inputs without a #TopLevel marker use #/definitions/ as their
 // source URI.  If the compiler did not produce any definitions, the renderer
-// receives no top levels and must still emit Rust without crashing.
+// receives no top levels and must still emit Rust without crashing.  With no
+// types there is nothing to derive, so not even the serde import is needed.
 test("Rust renders TypeScript schemas with no top levels", async () => {
     const output = await renderTypeScriptSchema({});
 
-    expect(output).toContain("use serde::{Serialize, Deserialize};");
+    expect(output).not.toContain("use serde");
 });
 
 test("Rust still renders named TypeScript schema definitions", async () => {
