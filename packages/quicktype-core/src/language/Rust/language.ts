@@ -113,9 +113,10 @@ export class RustTargetLanguage extends TargetLanguage<
         return INT64_RANGE;
     }
 
-    // serde (de)serializes Rust tuples as arrays of exactly their length.
+    // Fixed-length tuples are Rust tuples, the others tuple structs with
+    // hand-written serde impls.
     public get tupleSupport(): TupleSupport {
-        return "fixed";
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "rust">(

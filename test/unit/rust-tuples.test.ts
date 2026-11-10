@@ -1,5 +1,6 @@
 // serde (de)serializes Rust tuples as JSON arrays of exactly their length, so
-// Rust keeps fixed-length tuples.  Other tuple shapes stay arrays of a union.
+// Rust keeps fixed-length tuples.  Other tuple shapes are tuple structs with
+// their own impls, see rust-tuple-rest.test.ts.
 
 import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
 import { expect, test } from "vitest";
@@ -52,13 +53,13 @@ test.each([
         "pub struct TopLevel(pub String, pub f64);",
     ],
     [
-        "rest elements become an array",
+        "rest elements become a tuple struct",
         {
             type: "array",
             prefixItems: [{ type: "string" }],
             items: { type: "integer" },
         },
-        "pub type TopLevel = Vec<TopLevelElement>;",
+        "pub struct TopLevel(pub String, pub Vec<i64>);",
     ],
 ] as const)("%s", async (_, schema, expected) => {
     expect(await renderSchema(schema)).toContain(expected);

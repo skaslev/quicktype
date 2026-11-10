@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import { iterableSome, mapFirst } from "collection-utils";
+import { arrayIntercalate, iterableSome, mapFirst } from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -44,6 +44,23 @@ import {
     rustStringEscape,
     snakeNamingFunction,
 } from "./utils.js";
+
+function elements(n: number): string {
+    return n === 1 ? "1 element" : `${n} elements`;
+}
+
+// What a tuple with optional items or a rest expects, for error messages.
+function expectedTupleLength(t: TupleType): string {
+    const min = t.minItems;
+    const max = t.items.length;
+    if (t.rest !== undefined) {
+        return min === 0 ? "an array" : `an array of at least ${elements(min)}`;
+    }
+
+    return min === 0
+        ? `an array of at most ${elements(max)}`
+        : `an array of ${min} to ${max} elements`;
+}
 
 export class RustRenderer extends ConvenienceRenderer {
     private _strictClasses: ReadonlySet<Type> | undefined;
@@ -202,37 +219,201 @@ export class RustRenderer extends ConvenienceRenderer {
         );
     }
 
-    // Tuples are spelled out as `(A, B)` unless the schema names them or
-    // they contain themselves.  Named tuples become tuple structs, since a
-    // type alias can't refer to itself.
+    // Tuples are spelled out as `(A, B)` unless they have optional items or
+    // a rest, the schema names them, or they contain themselves.  Named
+    // tuples become tuple structs, since a type alias can't refer to itself.
     protected tupleNeedsName(t: TupleType): boolean {
+        const isNamedAnyway = (u: TupleType): boolean =>
+            !u.isFixedLength || this.hasGivenName(u);
         return (
-            this.hasGivenName(t) ||
+            isNamedAnyway(t) ||
             this.isInCycleThrough(
                 t,
                 (c) =>
                     !["class", "enum"].includes(c.kind) &&
                     !(c instanceof UnionType && this.unionNeedsName(c)) &&
-                    !(c instanceof TupleType && this.hasGivenName(c)),
+                    !(c instanceof TupleType && isNamedAnyway(c)),
             )
         );
     }
 
+    // serde (de)serializes tuple structs as arrays of exactly their length,
+    // so a tuple with optional items or a rest gets its own impls.  The
+    // optional items are `Option` fields and the rest a final `Vec`:
+    // `[A, B?, ...C[]]` is `(pub A, pub Option<B>, pub Vec<C>)`.
     protected emitTupleStruct(t: TupleType, tupleName: Name): void {
-        this.emitDescription(this.descriptionForType(t));
-        this.emitLine(
-            "#[derive(",
-            this._options.deriveDebug ? "Debug, " : "",
-            this._options.deriveClone ? "Clone, " : "",
-            this._options.derivePartialEq ? "PartialEq, " : "",
-            "Serialize, Deserialize)]",
-        );
-        const fields: Sourcelike[] = [];
-        t.items.forEach((item, i) => {
-            if (i > 0) fields.push(", ");
-            fields.push(this.visibility, this.breakCycle(item, true));
+        const derives = [
+            this._options.deriveDebug ? "Debug" : undefined,
+            this._options.deriveClone ? "Clone" : undefined,
+            this._options.derivePartialEq ? "PartialEq" : undefined,
+            ...(t.isFixedLength ? ["Serialize", "Deserialize"] : []),
+        ].filter((d) => d !== undefined);
+        const fields = t.items.map((item, i): Sourcelike => {
+            const rustType = this.breakCycle(item, true);
+            return i < t.minItems ? rustType : ["Option<", rustType, ">"];
         });
-        this.emitLine("pub struct ", tupleName, "(", fields, ");");
+        if (t.rest !== undefined) {
+            fields.push(["Vec<", this.rustType(t.rest, true), ">"]);
+        }
+
+        this.emitDescription(this.descriptionForType(t));
+        if (derives.length > 0) {
+            this.emitLine("#[derive(", derives.join(", "), ")]");
+        }
+
+        this.emitLine(
+            "pub struct ",
+            tupleName,
+            "(",
+            arrayIntercalate<Sourcelike>(
+                ", ",
+                fields.map((field) => [this.visibility, field]),
+            ),
+            ");",
+        );
+        if (!t.isFixedLength) {
+            this.ensureBlankLine();
+            this.emitTupleSerialize(t, tupleName);
+            this.ensureBlankLine();
+            this.emitTupleDeserialize(t, tupleName);
+        }
+    }
+
+    // The required items, the optional ones that are present, then the
+    // rest.  An item can't follow a missing one in JSON, so such a value is
+    // an error rather than written with the later items moved into the gap,
+    // or with nulls in it (which the item type may not allow, and which
+    // would come back as different values).
+    private emitTupleSerialize(t: TupleType, tupleName: Name): void {
+        const restIndex = t.items.length;
+        const present = t.items
+            .map((_, i) => i)
+            .filter((i) => i >= t.minItems)
+            .map((i) => `self.${i}.is_some()`);
+        if (t.rest !== undefined) {
+            present.push(`!self.${restIndex}.is_empty()`);
+        }
+
+        const body = (): void => {
+            this.emitLine("use serde::ser::SerializeSeq;");
+            this.ensureBlankLine();
+            if (present.length > 1) {
+                this.emitLine("let present = [", present.join(", "), "];");
+                this.emitBlock(
+                    "if present.windows(2).any(|pair| pair == [false, true])",
+                    () =>
+                        this.emitLine(
+                            'return Err(serde::ser::Error::custom("',
+                            tupleName,
+                            ': an item follows a missing optional item"));',
+                        ),
+                );
+                this.ensureBlankLine();
+            }
+
+            this.emitLine("let mut seq = serializer.serialize_seq(None)?;");
+            t.items.forEach((_, i) => {
+                if (i < t.minItems) {
+                    this.emitLine(`seq.serialize_element(&self.${i})?;`);
+                } else {
+                    this.emitBlock(`if let Some(item) = &self.${i}`, () =>
+                        this.emitLine("seq.serialize_element(item)?;"),
+                    );
+                }
+            });
+            if (t.rest !== undefined) {
+                this.emitBlock(`for item in &self.${restIndex}`, () =>
+                    this.emitLine("seq.serialize_element(item)?;"),
+                );
+            }
+
+            this.emitLine("seq.end()");
+        };
+
+        this.emitBlock(["impl Serialize for ", tupleName], () =>
+            this.emitBlock(
+                "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>",
+                body,
+            ),
+        );
+    }
+
+    // The required items must be there, the optional ones are read while
+    // there are elements, and the rest takes the remaining ones.  Reading
+    // past the end again yields `None`, which serde's derived
+    // `#[serde(default)]` fields rely on, too.  Like serde's own tuple
+    // impls, this leaves rejecting elements beyond the last item of a tuple
+    // without a rest to the format.
+    private emitTupleDeserialize(t: TupleType, tupleName: Name): void {
+        const visitorName: Sourcelike = [tupleName, "Visitor"];
+        const fields = t.items.map((_, i) => `item${i}`);
+        if (t.rest !== undefined) fields.push("rest");
+
+        const visitSeq = (): void => {
+            t.items.forEach((_, i) => {
+                if (i < t.minItems) {
+                    this.emitLine(
+                        `let Some(${fields[i]}) = seq.next_element()? else {`,
+                    );
+                    this.indent(() =>
+                        this.emitLine(
+                            `return Err(serde::de::Error::invalid_length(${i}, &self));`,
+                        ),
+                    );
+                    this.emitLine("};");
+                } else {
+                    this.emitLine(`let ${fields[i]} = seq.next_element()?;`);
+                }
+            });
+            if (t.rest !== undefined) {
+                this.emitLine("let mut rest = Vec::new();");
+                this.emitBlock(
+                    "while let Some(item) = seq.next_element()?",
+                    () => this.emitLine("rest.push(item);"),
+                );
+            }
+
+            this.emitLine("Ok(", tupleName, "(", fields.join(", "), "))");
+        };
+
+        const visitor = (): void => {
+            this.emitLine("type Value = ", tupleName, ";");
+            this.ensureBlankLine();
+            this.emitBlock(
+                "fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result",
+                () =>
+                    this.emitLine(
+                        'formatter.write_str("',
+                        expectedTupleLength(t),
+                        '")',
+                    ),
+            );
+            this.ensureBlankLine();
+            this.emitBlock(
+                "fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error>",
+                visitSeq,
+            );
+        };
+
+        this.emitBlock(["impl<'de> Deserialize<'de> for ", tupleName], () =>
+            this.emitBlock(
+                "fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>",
+                () => {
+                    this.emitLine("struct ", visitorName, ";");
+                    this.ensureBlankLine();
+                    this.emitBlock(
+                        ["impl<'de> serde::de::Visitor<'de> for ", visitorName],
+                        visitor,
+                    );
+                    this.ensureBlankLine();
+                    this.emitLine(
+                        "deserializer.deserialize_seq(",
+                        visitorName,
+                        ")",
+                    );
+                },
+            ),
+        );
     }
 
     private breakCycle(t: Type, withIssues: boolean): Sourcelike {
