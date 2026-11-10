@@ -5218,6 +5218,28 @@ ${this.sourcelikeToString(cJSON.items?.deleteType ?? "")}(validated);`,
                                     cJSON.getValue,
                                     "(j));",
                                 );
+                            } else if (this.isBoxedScalar(cJSON)) {
+                                // A nullable top-level number, bool or enum
+                                // is allocated, and NULL for null.
+                                this.emitBlock(
+                                    ["if (!cJSON_IsNull(j))"],
+                                    () => {
+                                        this.emitBlock(
+                                            [
+                                                "if (NULL != (x->value = cJSON_malloc(sizeof(",
+                                                cJSON.cType,
+                                                "))))",
+                                            ],
+                                            () => {
+                                                this.emitLine(
+                                                    "*x->value = ",
+                                                    cJSON.getValue,
+                                                    "(j);",
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
                             } else {
                                 this.emitLine(
                                     "x->value = ",
@@ -5433,6 +5455,12 @@ ${this.sourcelikeToString(cJSON.items?.deleteType ?? "")}(validated);`,
                         /* Nothing to do */
                     } else if (cJSON.cjsonType === "cJSON_NULL") {
                         this.emitLine("j = ", cJSON.createObject, "();");
+                    } else if (this.isBoxedScalar(cJSON)) {
+                        this.emitLine(
+                            "j = NULL != x->value ? ",
+                            cJSON.createObject,
+                            "(*x->value) : cJSON_CreateNull();",
+                        );
                     } else {
                         this.emitLine(
                             "j = ",
@@ -5578,6 +5606,8 @@ ${this.sourcelikeToString(cJSON.items?.deleteType ?? "")}(validated);`,
                         cJSON.cjsonType === "cJSON_Union"
                     ) {
                         this.emitLine(cJSON.deleteType, "(x->value);");
+                    } else if (this.isBoxedScalar(cJSON)) {
+                        this.emitLine("cJSON_free(x->value);");
                     } else {
                         /* Nothing to do */
                     }
@@ -5596,6 +5626,19 @@ ${this.sourcelikeToString(cJSON.items?.deleteType ?? "")}(validated);`,
      * @param isNullable: true if the field is nullable
      * @return cJSON type
      */
+    /** A number, bool or enum stored behind a pointer, i.e. a nullable one. */
+    private isBoxedScalar(cJSON: TypeCJSON): boolean {
+        return (
+            cJSON.optionalQualifier !== "" &&
+            [
+                "cJSON_Bool",
+                "cJSON_Integer",
+                "cJSON_Number",
+                "cJSON_Enum",
+            ].includes(cJSON.cjsonType)
+        );
+    }
+
     protected quicktypeTypeToCJSON(
         t: Type,
         isOptional: boolean,
