@@ -27,6 +27,7 @@ import {
     IntersectionType,
     ObjectType,
     type PrimitiveTypeKind,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -87,6 +88,11 @@ class IntersectionAccumulator
 
     private _arrayAttributes: TypeAttributes = emptyTypeAttributes;
 
+    // The tuples among the intersected types.  If there are any, the
+    // intersection is a tuple, and the item types of the arrays in
+    // `_arrayItemTypes` constrain each of its items.
+    private readonly _tuples: TupleType[] = [];
+
     // We start out with all object types allowed, which means
     // _additionalPropertyTypes is empty - no restrictions - and
     // _classProperties is empty - no defined properties so far.
@@ -137,6 +143,27 @@ class IntersectionAccumulator
     }
 
     private updateArrayItemTypes(members: Iterable<Type>): void {
+        const maybeTuple = iterableFind(
+            members,
+            (t) => t instanceof TupleType,
+        ) as TupleType | undefined;
+        if (maybeTuple !== undefined) {
+            this._arrayAttributes = combineTypeAttributes(
+                "intersect",
+                this._arrayAttributes,
+                maybeTuple.getAttributes(),
+            );
+            if (this._arrayItemTypes === undefined) {
+                this._arrayItemTypes = new Set();
+            }
+
+            if (this._arrayItemTypes !== false) {
+                this._tuples.push(maybeTuple);
+            }
+
+            return;
+        }
+
         const maybeArray = iterableFind(
             members,
             (t) => t instanceof ArrayType,
@@ -283,6 +310,7 @@ class IntersectionAccumulator
             },
             (transformedStringType) =>
                 this.addUnionSet([transformedStringType]),
+            (tupleType) => this.addUnionSet([tupleType]),
         );
         return makeTypeAttributesInferred(attributes);
     }
@@ -298,6 +326,10 @@ class IntersectionAccumulator
         }
 
         return this._arrayItemTypes;
+    }
+
+    public get tupleData(): readonly TupleType[] {
+        return this._tuples;
     }
 
     public get objectData():
@@ -341,7 +373,10 @@ class IntersectionAccumulator
             this._arrayItemTypes !== undefined &&
             this._arrayItemTypes !== false
         ) {
-            kinds.set("array", this._arrayAttributes);
+            kinds.set(
+                this._tuples.length > 0 ? "tuple" : "array",
+                this._arrayAttributes,
+            );
         } else if (this._arrayAttributes.size > 0) {
             this._lostTypeAttributes = true;
         }
@@ -444,6 +479,54 @@ class IntersectionUnionBuilder extends UnionBuilder<
             forwardingRef,
         );
         return tref;
+    }
+
+    protected makeTuple(
+        typeProvider: UnionTypeProvider<
+            ReadonlySet<Type>,
+            [PropertyMap, ReadonlySet<Type> | undefined] | undefined
+        >,
+        allTuples: readonly TupleType[],
+        typeAttributes: TypeAttributes,
+        forwardingRef: TypeRef | undefined,
+    ): TypeRef {
+        const first = defined(allTuples[0]);
+        // Tuples of another shape than the first can't be intersected
+        // position by position; they are left out.
+        const tuples = allTuples.filter(
+            (t) =>
+                t.items.length === first.items.length &&
+                t.minItems === first.minItems &&
+                (t.rest === undefined) === (first.rest === undefined),
+        );
+        if (tuples.length !== allTuples.length) {
+            this.typeBuilder.setLostTypeAttributes();
+        }
+
+        const arrayItems = Array.from(typeProvider.arrayData);
+        const items = first.items.map((_, i) =>
+            this.makeIntersection(
+                new Set([...tuples.map((t) => t.items[i]), ...arrayItems]),
+                emptyTypeAttributes,
+            ),
+        );
+        const rest =
+            first.rest === undefined
+                ? undefined
+                : this.makeIntersection(
+                      new Set([
+                          ...tuples.map((t) => defined(t.rest)),
+                          ...arrayItems,
+                      ]),
+                      emptyTypeAttributes,
+                  );
+        return this.typeBuilder.getTupleType(
+            typeAttributes,
+            items,
+            first.minItems,
+            rest,
+            forwardingRef,
+        );
     }
 }
 

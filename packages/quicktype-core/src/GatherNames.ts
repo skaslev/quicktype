@@ -198,6 +198,15 @@ export function gatherNames(
                         addNames(memberType, names);
                     }
                 },
+                (tupleType) => {
+                    const itemNames =
+                        names === null
+                            ? null
+                            : setMap(names, pluralize.singular);
+                    for (const item of tupleType.getNonAttributeChildren()) {
+                        addNames(item, itemNames);
+                    }
+                },
             );
         }
     }
@@ -361,6 +370,17 @@ export function gatherNames(
                         : ancestor;
                     for (const memberType of members) {
                         processType(ancestorForMembers, memberType, undefined);
+                    }
+                },
+                (tupleType) => {
+                    const tupleHasGivenName =
+                        tupleType.hasNames && !tupleType.getNames().areInferred;
+                    for (const item of tupleType.getNonAttributeChildren()) {
+                        processType(
+                            tupleHasGivenName ? tupleType : ancestor,
+                            item,
+                            "element",
+                        );
                     }
                 },
             );

@@ -214,6 +214,44 @@ export class TypeReconstituter<TBuilder extends BaseGraphRewriteBuilder> {
         this.builderForSetting().setArrayItems(this.getResult(), items);
     }
 
+    public getUniqueTupleType(): void {
+        this.register(
+            this.builderForNewType().getUniqueTupleType(
+                this._typeAttributes,
+                this._forwardingRef,
+            ),
+        );
+    }
+
+    public getTupleType(
+        items: readonly TypeRef[],
+        minItems: number,
+        rest: TypeRef | undefined,
+    ): void {
+        this.register(
+            this.builderForNewType().getTupleType(
+                this._typeAttributes,
+                items,
+                minItems,
+                rest,
+                this._forwardingRef,
+            ),
+        );
+    }
+
+    public setTupleItems(
+        items: readonly TypeRef[],
+        minItems: number,
+        rest: TypeRef | undefined,
+    ): void {
+        this.builderForSetting().setTupleItems(
+            this.getResult(),
+            items,
+            minItems,
+            rest,
+        );
+    }
+
     public makeClassProperty(
         tref: TypeRef,
         isOptional: boolean,

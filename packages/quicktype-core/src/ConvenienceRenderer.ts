@@ -64,6 +64,7 @@ import {
     EnumType,
     MapType,
     ObjectType,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -262,6 +263,10 @@ export abstract class ConvenienceRenderer extends Renderer {
             return undefined;
         }
 
+        if (type instanceof TupleType) {
+            return this.tupleNeedsName(type) ? type : undefined;
+        }
+
         if (
             type instanceof UnionType &&
             this.unionDeclarationsOmitNull &&
@@ -295,6 +300,41 @@ export abstract class ConvenienceRenderer extends Renderer {
         return panic(
             "If needsTypeDeclarationBeforeUse returns true, canBeForwardDeclared must be implemented",
         );
+    }
+
+    /**
+     * Whether a tuple is declared as a named type instead of being spelled
+     * out where it's used.  Only renderers for targets with tuple support
+     * see tuples.
+     */
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return false;
+    }
+
+    /** Whether the schema gave the type a name, e.g. with `title`. */
+    protected hasGivenName(t: Type): boolean {
+        return t.hasNames && !t.getNames().areInferred;
+    }
+
+    /**
+     * Whether `t` contains itself through types for which `passesThrough`
+     * holds, i.e. types that are spelled out rather than referred to by
+     * name.  Such a cycle can't be written down without naming `t`.
+     */
+    protected isInCycleThrough(
+        t: Type,
+        passesThrough: (t: Type) => boolean,
+    ): boolean {
+        const seen = new Set<Type>();
+        const work = Array.from(t.getNonAttributeChildren());
+        for (let c = work.pop(); c !== undefined; c = work.pop()) {
+            if (c === t) return true;
+            if (seen.has(c) || !passesThrough(c)) continue;
+            seen.add(c);
+            work.push(...c.getNonAttributeChildren());
+        }
+
+        return false;
     }
 
     /**
@@ -389,6 +429,13 @@ export abstract class ConvenienceRenderer extends Renderer {
         for (const e of enums) {
             const name = this.addNameForNamedType(e);
             this.addEnumCaseNames(e, name);
+        }
+
+        // Before the unions: union members are named after named tuples.
+        for (const t of this.typeGraph.allTypesUnordered()) {
+            if (t instanceof TupleType && this.tupleNeedsName(t)) {
+                this.addNameForNamedType(t);
+            }
         }
 
         for (const u of namedUnions) {
@@ -872,6 +919,10 @@ export abstract class ConvenienceRenderer extends Renderer {
                 (_enumType) => "enum",
                 (_unionType) => "union",
                 (transformedType) => transformedType.kind.replace("-", "_"),
+                (tupleType) =>
+                    this.tupleNeedsName(tupleType)
+                        ? lookup(this.nameForNamedType(tupleType))
+                        : "tuple",
             );
 
         return typeNameForUnionMember(fieldType);
@@ -1132,6 +1183,11 @@ export abstract class ConvenienceRenderer extends Renderer {
             unionName: Name,
             position: ForEachPosition,
         ) => void,
+        tupleFunc?: (
+            t: TupleType,
+            tupleName: Name,
+            position: ForEachPosition,
+        ) => void,
     ): void {
         this.forEachWithBlankLines(
             defined(this._namedTypes).entries(),
@@ -1146,6 +1202,8 @@ export abstract class ConvenienceRenderer extends Renderer {
                     enumFunc(t, name, pos);
                 } else if (t instanceof UnionType) {
                     unionFunc(t, name, pos);
+                } else if (t instanceof TupleType && tupleFunc !== undefined) {
+                    tupleFunc(t, name, pos);
                 } else {
                     return panic("Named type that's neither a class nor union");
                 }
@@ -1352,6 +1410,10 @@ export abstract class ConvenienceRenderer extends Renderer {
             (t) => {
                 if (t instanceof UnionType) {
                     return this.unionNeedsName(t);
+                }
+
+                if (t instanceof TupleType) {
+                    return this.tupleNeedsName(t);
                 }
 
                 return isNamedType(t);

@@ -28,6 +28,7 @@ import {
     ObjectType,
     type PrimitiveType,
     type SetOperationType,
+    TupleType,
     type Type,
     UnionType,
 } from "./Type.js";
@@ -294,6 +295,9 @@ export function matchTypeExhaustive<U>(
     enumType: (enumType: EnumType) => U,
     unionType: (unionType: UnionType) => U,
     transformedStringType: (transformedStringType: PrimitiveType) => U,
+    // Optional so that code for targets without tuple support stays as is:
+    // their graphs never contain tuples.
+    tupleType?: (tupleType: TupleType) => U,
 ): U {
     if (t.isPrimitive()) {
         if (isPrimitiveStringTypeKind(t.kind)) {
@@ -322,6 +326,11 @@ export function matchTypeExhaustive<U>(
     if (t instanceof ObjectType) return objectType(t);
     if (t instanceof EnumType) return enumType(t);
     if (t instanceof UnionType) return unionType(t);
+    if (t instanceof TupleType) {
+        if (tupleType !== undefined) return tupleType(t);
+        return panic("Tuple type in a match that doesn't handle tuples");
+    }
+
     return panic(`Unknown type ${t.kind}`);
 }
 
@@ -339,6 +348,7 @@ export function matchType<U>(
     enumType: (enumType: EnumType) => U,
     unionType: (unionType: UnionType) => U,
     transformedStringType?: (transformedStringType: PrimitiveType) => U,
+    tupleType?: (tupleType: TupleType) => U,
 ): U {
     function typeNotSupported(t: Type): never {
         return panic(`Unsupported type ${t.kind} in non-exhaustive match`);
@@ -360,6 +370,7 @@ export function matchType<U>(
         enumType,
         unionType,
         transformedStringType ?? typeNotSupported,
+        tupleType,
     );
 }
 
@@ -370,6 +381,7 @@ export function matchCompoundType(
     mapType: (mapType: MapType) => void,
     objectType: (objectType: ObjectType) => void,
     unionType: (unionType: UnionType) => void,
+    tupleType?: (tupleType: TupleType) => void,
 ): void {
     function ignore<T extends Type>(_: T): void {}
 
@@ -389,5 +401,6 @@ export function matchCompoundType(
         ignore,
         unionType,
         ignore,
+        tupleType,
     );
 }

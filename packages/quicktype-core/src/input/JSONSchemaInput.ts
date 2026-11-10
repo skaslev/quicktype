@@ -43,6 +43,7 @@ import {
     TypeNames,
     makeNamesTypeAttributes,
     modifyTypeNames,
+    namesTypeAttributeKind,
     singularizeTypeNames,
 } from "../attributes/TypeNames.js";
 import { uriSchemaAttributesProducer } from "../attributes/URIAttributes.js";
@@ -1106,28 +1107,99 @@ async function addTypesInSchema(
                         );
                     },
                 );
-                // In 2020-12 an object-form `items` next to `prefixItems`
-                // describes the rest elements of an open tuple.  quicktype
-                // models tuples as arrays of a union of the member types, so
-                // the rest type joins that union.  A boolean `items` (`false`
-                // closes the tuple, `true` allows anything) is ignored.
+                // The rest elements of an open tuple are described by an
+                // object-form `items` next to `prefixItems` (2020-12), or
+                // by `additionalItems` next to an array-form `items`
+                // (draft-07).  A boolean (`false` closes the tuple, `true`
+                // allows anything) is ignored, as is a missing one: the
+                // tuple is taken to be closed.
+                const restKey =
+                    tupleKey === "prefixItems" ? "items" : "additionalItems";
+                const restSchema =
+                    tupleKey === "prefixItems" ? items : schema.additionalItems;
+                let restType: TypeRef | undefined;
                 if (
-                    tupleKey === "prefixItems" &&
-                    typeof items === "object" &&
-                    !Array.isArray(items)
+                    typeof restSchema === "object" &&
+                    restSchema !== null &&
+                    !Array.isArray(restSchema)
                 ) {
-                    const restItemsLoc = loc.push("items");
-                    itemTypes.push(
-                        await toType(
-                            checkJSONSchema(items, restItemsLoc.canonicalRef),
-                            restItemsLoc,
-                            singularAttributes,
-                        ),
+                    const restItemsLoc = loc.push(restKey);
+                    restType = await toType(
+                        checkJSONSchema(restSchema, restItemsLoc.canonicalRef),
+                        restItemsLoc,
+                        singularAttributes,
                     );
                 }
-                // An empty tuple (`items: []`, or `prefixItems: []` without
-                // `items`) has no item types to make a union of: it doesn't
-                // constrain its elements, as if there were no `items`.
+
+                // A rest that `maxItems` limits to a few elements is just
+                // as many optional items, e.g. `[A, B, C?]`.
+                const positionalItems = itemTypes.length;
+                const maxItems = schema.maxItems;
+                if (
+                    restType !== undefined &&
+                    typeof maxItems === "number" &&
+                    maxItems - itemTypes.length <= maxOptionalTupleItems
+                ) {
+                    for (let i = itemTypes.length; i < maxItems; i++) {
+                        itemTypes.push(restType);
+                    }
+
+                    restType = undefined;
+                }
+
+                // Without `minItems` every positional item is taken to be
+                // present, which is what tuple schemas usually mean; the
+                // elements a bounded rest adds are optional.
+                const minItems =
+                    typeof schema.minItems === "number"
+                        ? Math.max(
+                              0,
+                              Math.min(
+                                  itemTypes.length,
+                                  Math.floor(schema.minItems),
+                              ),
+                          )
+                        : positionalItems;
+                const isFixedLength =
+                    minItems === itemTypes.length && restType === undefined;
+                if (
+                    itemTypes.length > 0 &&
+                    (typeBuilder.tupleSupport === "full" ||
+                        (typeBuilder.tupleSupport === "fixed" && isFixedLength))
+                ) {
+                    // A tuple whose schema names it (`title`, or as a
+                    // definition) keeps that name as given.  It would
+                    // otherwise only reach the tuple through the unions
+                    // around it, as an inferred name.
+                    const names =
+                        namesTypeAttributeKind.tryGetInAttributes(
+                            typeAttributes,
+                        );
+                    const tupleAttributes =
+                        names !== undefined && !names.areInferred
+                            ? combineTypeAttributes(
+                                  "union",
+                                  arrayAttributes,
+                                  namesTypeAttributeKind.makeAttributes(names),
+                              )
+                            : arrayAttributes;
+                    return typeBuilder.getTupleType(
+                        tupleAttributes,
+                        itemTypes,
+                        minItems,
+                        restType,
+                    );
+                }
+
+                // The target can't express this tuple: it becomes an array
+                // of the union of its item types.
+                if (restType !== undefined) {
+                    itemTypes.push(restType);
+                }
+
+                // An empty tuple without a rest has no item types to make a
+                // union of: its elements are taken to be anything, as if
+                // there were no `items`.
                 itemType =
                     itemTypes.length === 0
                         ? typeBuilder.getPrimitiveType("any")
@@ -1611,6 +1683,10 @@ export interface JSONSchemaSourceData {
     schema?: string;
     uris?: string[];
 }
+
+// The most rest elements of a tuple, limited by `maxItems`, that are turned
+// into optional items.
+const maxOptionalTupleItems = 4;
 
 export class JSONSchemaInput implements Input<JSONSchemaSourceData> {
     public readonly kind: string = "schema";

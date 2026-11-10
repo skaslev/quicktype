@@ -11,7 +11,7 @@ import {
     type SerializedRenderResult,
     serializeRenderResult,
 } from "./Source.js";
-import type { Type } from "./Type/Type.js";
+import type { TupleSupport, Type } from "./Type/Type.js";
 import type { StringTypeMapping } from "./Type/TypeBuilderUtils.js";
 import type { TypeGraph } from "./Type/TypeGraph.js";
 import type { Comment } from "./support/Comments.js";
@@ -113,6 +113,15 @@ export abstract class TargetLanguage<
 
     public get supportsFullObjectType(): boolean {
         return false;
+    }
+
+    /**
+     * The JSON Schema tuples (`prefixItems`, array-valued `items`) the
+     * renderer can express.  Other tuples become arrays of the union of
+     * their item types.
+     */
+    public get tupleSupport(): TupleSupport {
+        return "none";
     }
 
     public needsTransformerForType(_t: Type): boolean {

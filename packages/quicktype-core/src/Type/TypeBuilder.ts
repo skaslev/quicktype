@@ -36,6 +36,8 @@ import {
     type MaybeTypeIdentity,
     ObjectType,
     PrimitiveType,
+    type TupleSupport,
+    TupleType,
     type Type,
     type TypeIdentity,
     UnionType,
@@ -45,6 +47,7 @@ import {
     intersectionTypeIdentity,
     mapTypeIdentify,
     primitiveTypeIdentity,
+    tupleTypeIdentity,
     unionTypeIdentity,
 } from "./Type.js";
 import {
@@ -84,6 +87,12 @@ export class TypeBuilder {
             "We can't both inherit as well as add provenance",
         );
     }
+
+    /**
+     * The tuples inputs may create, from the target language's
+     * `tupleSupport`.  Inputs turn any other tuple into an array.
+     */
+    public tupleSupport: TupleSupport = "none";
 
     public get typeGraph(): TypeGraph {
         assert(!!this._typeGraph, "TypeBuilder must have a TypeGraph");
@@ -514,6 +523,53 @@ export class TypeBuilder {
         }
 
         type.setItems(items);
+        this.registerType(type);
+    }
+
+    public getUniqueTupleType(
+        attributes?: TypeAttributes,
+        forwardingRef?: TypeRef,
+    ): TypeRef {
+        return this.addType(
+            forwardingRef,
+            (tr) => new TupleType(tr, this.typeGraph),
+            attributes,
+        );
+    }
+
+    public getTupleType(
+        attributes: TypeAttributes,
+        items: readonly TypeRef[],
+        minItems: number,
+        rest: TypeRef | undefined,
+        forwardingRef?: TypeRef,
+    ): TypeRef {
+        for (const item of items) this.assertTypeRefGraph(item);
+        if (rest !== undefined) this.assertTypeRefGraph(rest);
+
+        return this.getOrAddType(
+            () => tupleTypeIdentity(attributes, items, minItems, rest),
+            (tr) => new TupleType(tr, this.typeGraph, items, minItems, rest),
+            attributes,
+            forwardingRef,
+        );
+    }
+
+    public setTupleItems(
+        ref: TypeRef,
+        items: readonly TypeRef[],
+        minItems: number,
+        rest: TypeRef | undefined,
+    ): void {
+        for (const item of items) this.assertTypeRefGraph(item);
+        if (rest !== undefined) this.assertTypeRefGraph(rest);
+
+        const type = derefTypeRef(ref, this.typeGraph);
+        if (!(type instanceof TupleType)) {
+            panic("Tried to set items of non-tuple type");
+        }
+
+        type.setItems(items, minItems, rest);
         this.registerType(type);
     }
 

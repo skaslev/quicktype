@@ -73,6 +73,7 @@ export type TypeKind =
     | PrimitiveTypeKind
     | NamedTypeKind
     | "array"
+    | "tuple"
     | "object"
     | "map"
     | "intersection";

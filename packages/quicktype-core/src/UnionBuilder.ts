@@ -21,6 +21,7 @@ import { assert, assertNever, defined, panic } from "./support/Support.js";
 import {
     type PrimitiveStringTypeKind,
     type PrimitiveTypeKind,
+    type TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -38,6 +39,13 @@ import { matchTypeExhaustive } from "./Type/TypeUtils.js";
 // Well, maybe getMemberKinds() is fine as it is.
 export interface UnionTypeProvider<TArrayData, TObjectData> {
     readonly arrayData: TArrayData;
+    /**
+     * The tuples making up the "tuple" members: one member for each
+     * shape, see `tupleShapeGroups`.
+     */
+    readonly tupleData: readonly TupleType[];
+    /** The attributes for each of `tupleData`, if known. */
+    readonly tupleAttributes?: readonly TypeAttributes[];
     readonly enumCases: ReadonlySet<string>;
 
     getMemberKinds: () => TypeAttributeMap<TypeKind>;
@@ -48,6 +56,28 @@ export interface UnionTypeProvider<TArrayData, TObjectData> {
 }
 
 export type TypeAttributeMap<T extends TypeKind> = Map<T, TypeAttributes>;
+
+/**
+ * Groups tuples by shape: the number of items, how many of them are
+ * required, and whether there's a rest.  A union has a member for each
+ * group, with the tuples in a group merged item by item.  Only targets that
+ * support tuples see them, and those can tell tuples of different shapes
+ * apart.
+ */
+export function tupleShapeGroups(tuples: readonly TupleType[]): TupleType[][] {
+    const groups = new Map<string, TupleType[]>();
+    for (const t of tuples) {
+        const key = `${t.items.length}/${t.minItems}/${t.rest !== undefined}`;
+        const group = groups.get(key);
+        if (group === undefined) {
+            groups.set(key, [t]);
+        } else {
+            group.push(t);
+        }
+    }
+
+    return Array.from(groups.values());
+}
 
 // The attributes of the members of each kind, one for each member.
 type TypeAttributeMapBuilder<T extends TypeKind> = Map<T, TypeAttributes[]>;
@@ -123,6 +153,10 @@ export class UnionAccumulator<TArray, TObject>
     private readonly _stringCases = new Map<string, number>();
 
     public readonly arrayData: TArray[] = [];
+
+    public readonly tupleData: TupleType[] = [];
+
+    public readonly tupleAttributes: TypeAttributes[] = [];
 
     public readonly objectData: TObject[] = [];
 
@@ -231,6 +265,16 @@ export class UnionAccumulator<TArray, TObject>
         addAttributesToBuilder(
             this._nonStringTypeAttributes,
             "array",
+            attributes,
+        );
+    }
+
+    public addTuple(t: TupleType, attributes: TypeAttributes): void {
+        this.tupleData.push(t);
+        this.tupleAttributes.push(attributes);
+        addAttributesToBuilder(
+            this._nonStringTypeAttributes,
+            "tuple",
             attributes,
         );
     }
@@ -484,6 +528,7 @@ export class TypeRefUnionAccumulator extends UnionAccumulator<
                     transformedStringType.kind as PrimitiveStringTypeKind,
                     attributes,
                 ),
+            (tupleType) => this.addTuple(tupleType, attributes),
         );
     }
 
@@ -515,6 +560,16 @@ export abstract class UnionBuilder<
         forwardingRef: TypeRef | undefined,
     ): TypeRef;
 
+    /** Makes one tuple from `tuples`, which all have the same shape. */
+    protected makeTuple(
+        _typeProvider: UnionTypeProvider<TArrayData, TObjectData>,
+        _tuples: readonly TupleType[],
+        _typeAttributes: TypeAttributes,
+        _forwardingRef: TypeRef | undefined,
+    ): TypeRef {
+        return panic("This union builder doesn't support tuples");
+    }
+
     private makeTypeOfKind(
         typeProvider: UnionTypeProvider<TArrayData, TObjectData>,
         kind: TypeKind,
@@ -543,6 +598,13 @@ export abstract class UnionBuilder<
             case "array":
                 return this.makeArray(
                     typeProvider.arrayData,
+                    typeAttributes,
+                    forwardingRef,
+                );
+            case "tuple":
+                return this.makeTuple(
+                    typeProvider,
+                    typeProvider.tupleData,
                     typeAttributes,
                     forwardingRef,
                 );
@@ -584,7 +646,10 @@ export abstract class UnionBuilder<
         // we get type refs for the wrong graphs if the transformation making rewrite
         // makes unions that have to be unified here.  That's a bug anyway, at least
         // right now, it's just a very bad way of surfacing that error.
-        if (kinds.size === 1) {
+        const tupleGroups = kinds.has("tuple")
+            ? tupleShapeGroups(typeProvider.tupleData)
+            : [];
+        if (kinds.size === 1 && tupleGroups.length <= 1) {
             const [[kind, memberAttributes]] = Array.from(kinds);
             const allAttributes = combineTypeAttributes(
                 "union",
@@ -610,6 +675,34 @@ export abstract class UnionBuilder<
 
         const types: TypeRef[] = [];
         for (const [kind, memberAttributes] of kinds) {
+            if (kind === "tuple" && tupleGroups.length > 1) {
+                // Each group keeps the attributes of its own tuples.
+                const allTuples = typeProvider.tupleData;
+                const allAttributes = typeProvider.tupleAttributes;
+                for (const group of tupleGroups) {
+                    const attributes =
+                        allAttributes === undefined
+                            ? emptyTypeAttributes
+                            : unionTypeAttributes(
+                                  group.map((t) =>
+                                      defined(
+                                          allAttributes[allTuples.indexOf(t)],
+                                      ),
+                                  ),
+                              );
+                    types.push(
+                        this.makeTuple(
+                            typeProvider,
+                            group,
+                            attributes,
+                            undefined,
+                        ),
+                    );
+                }
+
+                continue;
+            }
+
             types.push(
                 this.makeTypeOfKind(
                     typeProvider,

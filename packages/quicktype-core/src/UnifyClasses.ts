@@ -1,9 +1,11 @@
-import { iterableFirst, setUnionInto } from "collection-utils";
+import { iterableFirst, mapFilter, setUnionInto } from "collection-utils";
 
+import { minMaxItemsTypeAttributeKind } from "./attributes/Constraints.js";
 import {
     type TypeAttributes,
     combineTypeAttributes,
     emptyTypeAttributes,
+    unionTypeAttributes,
 } from "./attributes/TypeAttributes.js";
 import type {
     BaseGraphRewriteBuilder,
@@ -14,13 +16,18 @@ import { assert, defined, panic } from "./support/Support.js";
 import {
     type ClassProperty,
     type ObjectType,
+    type TupleType,
     type Type,
     UnionType,
 } from "./Type/Type.js";
 import type { TypeBuilder } from "./Type/TypeBuilder.js";
 import { type TypeRef, derefTypeRef } from "./Type/TypeRef.js";
 import { assertIsObject } from "./Type/TypeUtils.js";
-import { TypeRefUnionAccumulator, UnionBuilder } from "./UnionBuilder.js";
+import {
+    TypeRefUnionAccumulator,
+    UnionBuilder,
+    type UnionTypeProvider,
+} from "./UnionBuilder.js";
 
 function getCliqueProperties(
     clique: ObjectType[],
@@ -236,6 +243,60 @@ export class UnifyUnionBuilder extends UnionBuilder<
             forwardingRef,
         );
         return ref;
+    }
+
+    // The tuples have the same shape, so they are unified item by item.
+    protected makeTuple(
+        _typeProvider: UnionTypeProvider<TypeRef[], TypeRef[]>,
+        tuples: readonly TupleType[],
+        typeAttributes: TypeAttributes,
+        forwardingRef: TypeRef | undefined,
+    ): TypeRef {
+        const first = defined(tuples[0]);
+        // A single tuple is reconstituted, like a single object, so that
+        // it keeps its own attributes, such as a given name.  The union's
+        // attributes for it can include `minItems`/`maxItems`, which a tuple
+        // has in its shape instead; added to a tuple that was already
+        // rebuilt elsewhere, they would conflict with its identity.
+        if (tuples.length === 1) {
+            const tupleAttributes = mapFilter(
+                typeAttributes,
+                (_, k) => k !== minMaxItemsTypeAttributeKind,
+            );
+            const maybeTypeRef = this.typeBuilder.lookupTypeRefs(
+                [first.typeRef],
+                forwardingRef,
+            );
+            if (maybeTypeRef !== undefined) {
+                this.typeBuilder.addAttributes(maybeTypeRef, tupleAttributes);
+                return maybeTypeRef;
+            }
+
+            return this.typeBuilder.reconstituteTypeRef(
+                first.typeRef,
+                tupleAttributes,
+                forwardingRef,
+            );
+        }
+
+        const items = first.items.map((_, i) =>
+            this._unifyTypes(tuples.map((t) => t.items[i].typeRef)),
+        );
+        const rest =
+            first.rest === undefined
+                ? undefined
+                : this._unifyTypes(tuples.map((t) => defined(t.rest).typeRef));
+        return this.typeBuilder.getTupleType(
+            combineTypeAttributes(
+                "union",
+                typeAttributes,
+                unionTypeAttributes(tuples.map((t) => t.getAttributes())),
+            ),
+            items,
+            first.minItems,
+            rest,
+            forwardingRef,
+        );
     }
 }
 

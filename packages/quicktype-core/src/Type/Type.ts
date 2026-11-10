@@ -396,6 +396,183 @@ export class ArrayType extends Type {
     }
 }
 
+/**
+ * Which tuples a target language can express.  `fixed` covers tuples with
+ * exactly one element per item type; `full` adds optional trailing items
+ * and a rest type.  Tuples a language can't express become arrays of the
+ * union of their item types.
+ */
+export type TupleSupport = "none" | "fixed" | "full";
+
+export function tupleTypeIdentity(
+    attributes: TypeAttributes,
+    itemRefs: readonly TypeRef[],
+    minItems: number,
+    restRef: TypeRef | undefined,
+): MaybeTypeIdentity {
+    if (hasUniqueIdentityAttributes(attributes)) return undefined;
+    // Identities of the same kind must have the same number of
+    // components, so the items are joined into a single one.
+    return new TypeIdentity("tuple", [
+        identityAttributes(attributes),
+        itemRefs.join(","),
+        minItems,
+        restRef,
+    ]);
+}
+
+/**
+ * A JSON array with a type per position (JSON Schema `prefixItems`, or an
+ * array-valued `items`).  The first `minItems` items are always present,
+ * the remaining ones may be missing from the end.  Elements after the
+ * positional ones, if allowed, are of type `rest`.
+ *
+ * Only targets whose `tupleSupport` allows a tuple's shape ever see it;
+ * for the others the input turns it into an array of the union of its
+ * item types.
+ */
+export class TupleType extends Type {
+    public readonly kind = "tuple";
+
+    public constructor(
+        typeRef: TypeRef,
+        graph: TypeGraph,
+        private _itemRefs?: readonly TypeRef[],
+        private _minItems?: number,
+        private _restRef?: TypeRef,
+    ) {
+        super(typeRef, graph);
+    }
+
+    public setItems(
+        itemRefs: readonly TypeRef[],
+        minItems: number,
+        restRef: TypeRef | undefined,
+    ): void {
+        if (this._itemRefs !== undefined) {
+            panic("Can only set tuple items once");
+        }
+
+        assert(
+            minItems >= 0 && minItems <= itemRefs.length,
+            "Tuple minItems out of range",
+        );
+        this._itemRefs = itemRefs;
+        this._minItems = minItems;
+        this._restRef = restRef;
+    }
+
+    private getItemRefs(): readonly TypeRef[] {
+        if (this._itemRefs === undefined) {
+            return panic("Tuple items accessed before they were set");
+        }
+
+        return this._itemRefs;
+    }
+
+    public get items(): readonly Type[] {
+        return this.getItemRefs().map((r) => derefTypeRef(r, this.graph));
+    }
+
+    public get minItems(): number {
+        this.getItemRefs();
+        return defined(this._minItems);
+    }
+
+    public get rest(): Type | undefined {
+        this.getItemRefs();
+        return this._restRef === undefined
+            ? undefined
+            : derefTypeRef(this._restRef, this.graph);
+    }
+
+    /** Exactly `items.length` elements: no optional items and no rest. */
+    public get isFixedLength(): boolean {
+        return (
+            this.minItems === this.getItemRefs().length &&
+            this._restRef === undefined
+        );
+    }
+
+    public getNonAttributeChildren(): Set<Type> {
+        const children = new Set(this.items);
+        const rest = this.rest;
+        if (rest !== undefined) children.add(rest);
+        return children;
+    }
+
+    public get isNullable(): boolean {
+        return false;
+    }
+
+    public isPrimitive(): this is PrimitiveType {
+        return false;
+    }
+
+    public get identity(): MaybeTypeIdentity {
+        return tupleTypeIdentity(
+            this.getAttributes(),
+            this.getItemRefs(),
+            this.minItems,
+            this._restRef,
+        );
+    }
+
+    public reconstitute<T extends BaseGraphRewriteBuilder>(
+        builder: TypeReconstituter<T>,
+    ): void {
+        const itemRefs = this.getItemRefs();
+        const maybeItems = itemRefs.map((r) => builder.lookup(r));
+        const maybeRest =
+            this._restRef === undefined
+                ? undefined
+                : builder.lookup(this._restRef);
+        if (
+            maybeItems.some((r) => r === undefined) ||
+            (this._restRef !== undefined && maybeRest === undefined)
+        ) {
+            builder.getUniqueTupleType();
+            builder.setTupleItems(
+                itemRefs.map((r) => builder.reconstitute(r)),
+                this.minItems,
+                this._restRef === undefined
+                    ? undefined
+                    : builder.reconstitute(this._restRef),
+            );
+        } else {
+            builder.getTupleType(
+                maybeItems.map((r) => defined(r)),
+                this.minItems,
+                maybeRest,
+            );
+        }
+    }
+
+    protected structuralEqualityStep(
+        other: TupleType,
+        _conflateNumbers: boolean,
+        queue: (a: Type, b: Type) => boolean,
+    ): boolean {
+        const items = this.items;
+        const otherItems = other.items;
+        const rest = this.rest;
+        const otherRest = other.rest;
+        if (
+            items.length !== otherItems.length ||
+            this.minItems !== other.minItems ||
+            (rest === undefined) !== (otherRest === undefined)
+        ) {
+            return false;
+        }
+
+        for (let i = 0; i < items.length; i++) {
+            if (!queue(items[i], otherItems[i])) return false;
+        }
+
+        return rest === undefined || queue(rest, defined(otherRest));
+    }
+}
+
 export class GenericClassProperty<T> {
     public constructor(
         public readonly typeData: T,

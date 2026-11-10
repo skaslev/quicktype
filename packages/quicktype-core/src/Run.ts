@@ -245,6 +245,7 @@ class Run implements RunContext {
             0,
             this._options.checkProvenance,
         );
+        typeBuilder.tupleSupport = targetLanguage.tupleSupport;
 
         return {
             targetLanguage,
