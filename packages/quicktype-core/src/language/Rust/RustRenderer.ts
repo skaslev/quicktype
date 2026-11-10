@@ -19,6 +19,7 @@ import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
     type ClassType,
     type EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -177,7 +178,58 @@ export class RustRenderer extends ConvenienceRenderer {
                     ? (["Option<", name, ">"] as Sourcelike)
                     : name;
             },
+            undefined,
+            (tupleType) => {
+                if (this.tupleNeedsName(tupleType)) {
+                    return this.nameForNamedType(tupleType);
+                }
+
+                // A tuple with one element needs a trailing comma.
+                const items = tupleType.items.map((item) =>
+                    this.breakCycle(item, withIssues),
+                );
+                const source: Sourcelike[] = ["("];
+                items.forEach((item, i) => {
+                    if (i > 0) source.push(", ");
+                    source.push(item);
+                });
+                source.push(items.length === 1 ? ",)" : ")");
+                return source;
+            },
         );
+    }
+
+    // Tuples are spelled out as `(A, B)` unless the schema names them or
+    // they contain themselves.  Named tuples become tuple structs, since a
+    // type alias can't refer to itself.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "enum"].includes(c.kind) &&
+                    !(c instanceof UnionType && this.unionNeedsName(c)) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
+    }
+
+    protected emitTupleStruct(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        this.emitLine(
+            "#[derive(",
+            this._options.deriveDebug ? "Debug, " : "",
+            this._options.deriveClone ? "Clone, " : "",
+            this._options.derivePartialEq ? "PartialEq, " : "",
+            "Serialize, Deserialize)]",
+        );
+        const fields: Sourcelike[] = [];
+        t.items.forEach((item, i) => {
+            if (i > 0) fields.push(", ");
+            fields.push(this.visibility, this.breakCycle(item, true));
+        });
+        this.emitLine("pub struct ", tupleName, "(", fields, ");");
     }
 
     private breakCycle(t: Type, withIssues: boolean): Sourcelike {
@@ -315,12 +367,14 @@ export class RustRenderer extends ConvenienceRenderer {
 
         // serde takes the first variant of an untagged enum that
         // deserializes, and a struct also deserializes from an array of its
-        // fields' values, so the array variant goes before a struct variant,
-        // which would take the arrays of as many elements of its fields'
-        // types.
+        // fields' values, so the array and tuple variants go before a struct
+        // variant, which would take the arrays of as many elements of its
+        // fields' types.
+        const isSequence = (t: Type): boolean =>
+            t.kind === "array" || t.kind === "tuple";
         const sortOrder = iterableSome(nonNulls, (t) => t.kind === "class")
             ? (n: Name, t: Type): string =>
-                  `${t.kind === "array" ? 0 : 1}${defined(this.names.get(n))}`
+                  `${isSequence(t) ? 0 : 1}${defined(this.names.get(n))}`
             : null;
 
         const blankLines =
@@ -441,6 +495,7 @@ export class RustRenderer extends ConvenienceRenderer {
             (c: ClassType, name: Name) => this.emitStructDefinition(c, name),
             (e, name) => this.emitEnumDefinition(e, name),
             (u, name) => this.emitUnion(u, name),
+            (t, name) => this.emitTupleStruct(t, name),
         );
     }
 }

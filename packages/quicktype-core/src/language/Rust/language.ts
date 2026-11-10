@@ -10,6 +10,7 @@ import {
     type IntegerRange,
 } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
 import { RustRenderer } from "./RustRenderer.js";
@@ -106,6 +107,11 @@ export class RustTargetLanguage extends TargetLanguage<
         }
 
         return INT64_RANGE;
+    }
+
+    // serde (de)serializes Rust tuples as arrays of exactly their length.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
     }
 
     protected makeRenderer<Lang extends LanguageName = "rust">(

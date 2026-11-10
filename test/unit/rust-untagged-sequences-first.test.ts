@@ -70,6 +70,32 @@ describe("an untagged enum", () => {
         );
     });
 
+    test("lists a tuple variant before a struct variant", async () => {
+        const output = await renderRust({
+            oneOf: [
+                alpha,
+                {
+                    type: "array",
+                    items: [{ type: "string" }],
+                    minItems: 1,
+                    maxItems: 1,
+                },
+                { type: "integer" },
+            ],
+        });
+        expect(output).toContain(
+            [
+                "pub enum TopLevel {",
+                "    Tuple((String,)),",
+                "",
+                "    Alpha(Alpha),",
+                "",
+                "    Integer(i64),",
+                "}",
+            ].join("\n"),
+        );
+    });
+
     test("without a struct variant lists its variants by name", async () => {
         const output = await renderRust({
             oneOf: [strings, { type: "integer" }],
