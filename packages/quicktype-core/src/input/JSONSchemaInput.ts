@@ -1147,9 +1147,14 @@ async function addTypesInSchema(
                             isFixedLength));
 
                 // While a tuple that becomes an array is converted, a
-                // reference to it from its own items becomes `any`, see
-                // `toType`.
-                if (!keepTuple) tuplesBeingLowered.push(loc.canonicalRef);
+                // reference to it from its own items becomes `any`, unless
+                // the target can declare the union that contains itself,
+                // see `toType`.
+                const breakSelfReferences =
+                    !keepTuple && !typeBuilder.supportsRecursiveUnions;
+                if (breakSelfReferences) {
+                    tuplesBeingLowered.push(loc.canonicalRef);
+                }
                 const itemsLoc = loc.push(tupleKey);
                 let itemTypes: TypeRef[];
                 let restType: TypeRef | undefined;
@@ -1177,7 +1182,7 @@ async function addTypesInSchema(
                         );
                     }
                 } finally {
-                    if (!keepTuple) tuplesBeingLowered.pop();
+                    if (breakSelfReferences) tuplesBeingLowered.pop();
                 }
 
                 if (restType !== undefined && restIsBounded) {
@@ -1568,7 +1573,8 @@ async function addTypesInSchema(
         // A tuple the target can't express becomes an array of the union of
         // its item types.  If an item refers to the tuple itself, that union
         // would contain itself through arrays and unions only, which most
-        // renderers can't declare, so the reference becomes `any`.
+        // renderers can't declare (`supportsRecursiveUnions`), so the
+        // reference becomes `any`.
         if (tuplesBeingLowered.some((r) => r.equals(loc.canonicalRef))) {
             return typeBuilder.getPrimitiveType("any");
         }

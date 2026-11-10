@@ -28,6 +28,10 @@ export class PikeTargetLanguage extends TargetLanguage<
         return {};
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     protected makeRenderer(renderContext: RenderContext): PikeRenderer {
         return new PikeRenderer(this, renderContext);
     }

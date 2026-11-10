@@ -182,6 +182,10 @@ export class CSharpTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     public get supportsOptionalClassProperties(): boolean {
         return true;
     }

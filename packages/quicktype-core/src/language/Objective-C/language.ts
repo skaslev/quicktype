@@ -62,6 +62,10 @@ export class ObjectiveCTargetLanguage extends TargetLanguage<
         ]);
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     protected makeRenderer<Lang extends LanguageName = "objective-c">(
         renderContext: RenderContext,
         untypedOptionValues: RendererOptions<Lang>,

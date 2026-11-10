@@ -157,6 +157,10 @@ export class SwiftTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     protected makeRenderer<Lang extends LanguageName = "swift">(
         renderContext: RenderContext,
         untypedOptionValues: RendererOptions<Lang>,

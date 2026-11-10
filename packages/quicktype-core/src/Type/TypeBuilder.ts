@@ -94,6 +94,13 @@ export class TypeBuilder {
      */
     public tupleSupport: TupleSupport = "none";
 
+    /**
+     * Whether inputs may create unions that contain themselves through
+     * arrays and unions only, from the target language's
+     * `supportsRecursiveUnions`.
+     */
+    public supportsRecursiveUnions = false;
+
     public get typeGraph(): TypeGraph {
         assert(!!this._typeGraph, "TypeBuilder must have a TypeGraph");
         return this._typeGraph;

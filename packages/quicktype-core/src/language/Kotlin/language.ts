@@ -64,6 +64,10 @@ export class KotlinTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     public get stringTypeMapping(): StringTypeMapping {
         const mapping: Map<TransformedStringTypeKind, PrimitiveStringTypeKind> =
             new Map();

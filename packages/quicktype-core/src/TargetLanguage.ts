@@ -124,6 +124,18 @@ export abstract class TargetLanguage<
         return "none";
     }
 
+    /**
+     * Whether the renderer can declare a union that contains itself through
+     * arrays and unions only, with no class in between, e.g. a union of a
+     * string and an array of the union.  A tuple the target can't express
+     * becomes an array of the union of its item types, so a tuple whose
+     * items refer back to it gives such a union.  Without this, those
+     * references become `any`.
+     */
+    public get supportsRecursiveUnions(): boolean {
+        return false;
+    }
+
     public needsTransformerForType(_t: Type): boolean {
         return false;
     }
