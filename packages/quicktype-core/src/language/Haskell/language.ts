@@ -6,6 +6,7 @@ import {
     getOptionValues,
 } from "../../RendererOptions/index.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
 import { HaskellRenderer } from "./HaskellRenderer.js";
@@ -52,6 +53,11 @@ export class HaskellTargetLanguage extends TargetLanguage<
 
     public get supportsUnionsWithBothNumberTypes(): boolean {
         return true;
+    }
+
+    // aeson (de)serializes tuples as arrays of exactly their length.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
     }
 
     protected makeRenderer<Lang extends LanguageName = "haskell">(

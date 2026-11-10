@@ -1,4 +1,4 @@
-import { mapContains } from "collection-utils";
+import { arrayIntercalate, mapContains } from "collection-utils";
 
 import {
     ConvenienceRenderer,
@@ -16,11 +16,12 @@ import {
 } from "../../Source.js";
 import { stringEscape } from "../../support/Strings.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
-import type {
-    ClassProperty,
-    ClassType,
-    EnumType,
-    Type,
+import {
+    type ClassProperty,
+    type ClassType,
+    type EnumType,
+    TupleType,
+    type Type,
     UnionType,
 } from "../../Type/index.js";
 import { matchType, nullableFromUnion } from "../../Type/TypeUtils.js";
@@ -40,6 +41,9 @@ function haskellStringEscape(s: string): string {
 // The kinds of JSON values, aeson's `Value` constructors: Object, Array,
 // String, Number, Bool and Null.
 const valueKindCount = 6;
+
+// aeson has instances for tuples of up to 15 elements, as has Show.
+const maxTupleLength = 15;
 
 export class HaskellRenderer extends ConvenienceRenderer {
     public constructor(
@@ -181,7 +185,39 @@ export class HaskellRenderer extends ConvenienceRenderer {
 
                 return singleWord(this.nameForNamedType(unionType));
             },
+            undefined,
+            (tupleType) =>
+                this.tupleNeedsName(tupleType)
+                    ? singleWord(this.nameForNamedType(tupleType))
+                    : this.tupleSource(tupleType),
         );
+    }
+
+    // Tuples are spelled out, `(A, B)`, unless the schema names them or
+    // they can't be a type synonym of a Haskell tuple.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return this.hasGivenName(t) || this.tupleIsData(t);
+    }
+
+    /**
+     * Whether a tuple is declared as a data type with JSON instances of its
+     * own instead of a type synonym: Haskell has no one-element tuple (and
+     * aeson encodes `Solo a` as just `a`), longer tuples than
+     * `maxTupleLength` have no instances, and a type synonym can't refer to
+     * itself, other than through a data type.
+     */
+    private tupleIsData(t: TupleType): boolean {
+        const isData = (c: Type): boolean =>
+            ["class", "enum"].includes(c.kind) ||
+            (c instanceof UnionType && this.unionNeedsName(c)) ||
+            (c instanceof TupleType &&
+                (c.items.length === 1 || c.items.length > maxTupleLength));
+        return isData(t) || this.isInCycleThrough(t, (c) => !isData(c));
+    }
+
+    private tupleSource(t: TupleType): MultiWord {
+        const items = t.items.map((item) => this.haskellType(item).source);
+        return singleWord("(", ...arrayIntercalate(", ", items), ")");
     }
 
     private haskellProperty(p: ClassProperty): Sourcelike {
@@ -210,6 +246,8 @@ export class HaskellRenderer extends ConvenienceRenderer {
             (_mapType) => singleWord("Object"),
             (_enumType) => singleWord("String"),
             (_unionType) => singleWord("Object"),
+            undefined,
+            (_tupleType) => singleWord("Array"),
         );
     }
 
@@ -303,6 +341,31 @@ export class HaskellRenderer extends ConvenienceRenderer {
             });
             this.emitLine("deriving (Show)");
         });
+    }
+
+    private emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        if (!this.tupleIsData(t)) {
+            this.emitLine(
+                "type ",
+                tupleName,
+                " = ",
+                this.tupleSource(t).source,
+            );
+            return;
+        }
+
+        this.emitLine(
+            t.items.length === 1 ? "newtype " : "data ",
+            tupleName,
+            " = ",
+            tupleName,
+            ...t.items.map((item) => [
+                " ",
+                parenIfNeeded(this.haskellType(item)),
+            ]),
+        );
+        this.indent(() => this.emitLine("deriving (Show)"));
     }
 
     private emitTopLevelFunctions(topLevelName: Name): void {
@@ -458,7 +521,25 @@ export class HaskellRenderer extends ConvenienceRenderer {
         });
     }
 
+    /**
+     * A union's tuples and array, which are all JSON arrays, if it has a
+     * tuple and another one of them.  They're tried in turn, tuples first.
+     */
+    private arrayMembersTriedInTurn(u: UnionType): Name[] {
+        const tuples: Name[] = [];
+        const arrays: Name[] = [];
+        this.forEachUnionMember(u, null, "none", null, (name, t) => {
+            if (t instanceof TupleType) tuples.push(name);
+            else if (t.kind === "array") arrays.push(name);
+        });
+        return tuples.length > 0 && tuples.length + arrays.length > 1
+            ? [...tuples, ...arrays]
+            : [];
+    }
+
     private emitUnionDecoderInstance(u: UnionType, unionName: Name): void {
+        const arrays = this.arrayMembersTriedInTurn(u);
+        let arraysEmitted = false;
         // The kinds of JSON values the members take, the constructors of
         // `Value` they match.
         const kinds = new Set<string>();
@@ -468,6 +549,23 @@ export class HaskellRenderer extends ConvenienceRenderer {
                 if (t.kind === "null") {
                     kinds.add("Null");
                     this.emitLine("parseJSON Null = return ", name);
+                } else if (arrays.includes(name)) {
+                    if (arraysEmitted) return;
+                    arraysEmitted = true;
+                    kinds.add("Array");
+                    this.emitLine(
+                        "parseJSON xs@(Array _) = ",
+                        arrayIntercalate(
+                            " <|> ",
+                            arrays.map(
+                                (n): Sourcelike => [
+                                    "(fmap ",
+                                    n,
+                                    " . parseJSON) xs",
+                                ],
+                            ),
+                        ),
+                    );
                 } else {
                     const kind = this.encoderNameForType(t).source;
                     kinds.add(this.sourcelikeToString(kind));
@@ -497,6 +595,46 @@ export class HaskellRenderer extends ConvenienceRenderer {
         this.emitUnionDecoderInstance(u, unionName);
     }
 
+    // The JSON of a tuple's data type is an array of its fields.
+    private emitTupleFunctions(t: TupleType, tupleName: Name): void {
+        if (!this.tupleIsData(t)) return;
+
+        const fields = t.items.map((_, i) => `x${i}`);
+        this.emitLine("instance ToJSON ", tupleName, " where");
+        this.indent(() => {
+            this.emitLine(
+                "toJSON (",
+                tupleName,
+                ...fields.map((x) => ` ${x}`),
+                ") = toJSON [",
+                fields.map((x) => `toJSON ${x}`).join(", "),
+                "]",
+            );
+        });
+        this.ensureBlankLine();
+        this.emitLine("instance FromJSON ", tupleName, " where");
+        this.indent(() => {
+            this.emitLine("parseJSON v = do");
+            this.indent(() => {
+                this.emitLine("xs <- parseJSON v");
+                this.emitLine("case xs of");
+                this.indent(() => {
+                    this.emitLine(
+                        "[",
+                        fields.join(", "),
+                        "] -> ",
+                        tupleName,
+                        " <$> ",
+                        fields.map((x) => `parseJSON ${x}`).join(" <*> "),
+                    );
+                    this.emitLine(
+                        `_ -> fail "expected an array of length ${fields.length}"`,
+                    );
+                });
+            });
+        });
+    }
+
     private emitLanguageExtensions(ext: string): void {
         this.emitLine(`{-# LANGUAGE ${ext} #-}`);
     }
@@ -515,6 +653,10 @@ export class HaskellRenderer extends ConvenienceRenderer {
         this.forEachUnion("none", (t, name) => {
             if (!mapContains(this.topLevels, t)) exports.push([name, " (..)"]);
         });
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (t, name) => {
+            if (!mapContains(this.topLevels, t)) exports.push([name, " (..)"]);
+        });
 
         this.emitLanguageExtensions("StrictData");
         this.emitLanguageExtensions("OverloadedStrings");
@@ -531,6 +673,14 @@ export class HaskellRenderer extends ConvenienceRenderer {
                 this.emitLine(") where");
             });
             this.ensureBlankLine();
+            if (
+                Array.from(this.namedUnions).some(
+                    (u) => this.arrayMembersTriedInTurn(u).length > 0,
+                )
+            ) {
+                this.emitLine("import Control.Applicative ((<|>))");
+            }
+
             this.emitMultiline(`import Data.Aeson
 import Data.Aeson.Types (emptyObject, typeMismatch)
 import Data.ByteString.Lazy (ByteString)
@@ -584,6 +734,8 @@ import Data.Text (Text)`);
                 this.emitEnumDefinition(e, enumName),
             (u: UnionType, unionName: Name) =>
                 this.emitUnionDefinition(u, unionName),
+            (t: TupleType, tupleName: Name) =>
+                this.emitTupleDefinition(t, tupleName),
         );
 
         // decodeTopLevel and the JSON instances need Aeson.
@@ -603,6 +755,8 @@ import Data.Text (Text)`);
                 this.emitEnumFunctions(e, enumName),
             (u: UnionType, unionName: Name) =>
                 this.emitUnionFunctions(u, unionName),
+            (t: TupleType, tupleName: Name) =>
+                this.emitTupleFunctions(t, tupleName),
         );
 
         if (this._options.justTypes) return;
