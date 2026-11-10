@@ -1,5 +1,6 @@
 import { iterableFirst, mapFirst } from "collection-utils";
 
+import { minMaxItemsForType } from "../../attributes/Constraints.js";
 import { addDescriptionToSchema } from "../../attributes/Description.js";
 import { ConvenienceRenderer } from "../../ConvenienceRenderer.js";
 import type { Name, Namer } from "../../Naming.js";
@@ -7,8 +8,9 @@ import { defined, panic } from "../../support/Support.js";
 import {
     type EnumType,
     type ObjectType,
+    TupleType,
     type Type,
-    type UnionType,
+    UnionType,
     transformedStringTypeTargetTypeKindsMap,
 } from "../../Type/index.js";
 import { matchTypeExhaustive } from "../../Type/TypeUtils.js";
@@ -35,6 +37,22 @@ export class JSONSchemaRenderer extends ConvenienceRenderer {
 
     protected makeEnumCaseNamer(): null {
         return null;
+    }
+
+    // Tuples are spelled out, unless the schema names them or they contain
+    // themselves other than through a definition: those are definitions
+    // too.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "object", "enum"].includes(c.kind) &&
+                    !(c instanceof UnionType && this.unionNeedsName(c)) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
     }
 
     private nameForType(t: Type): string {
@@ -106,6 +124,13 @@ export class JSONSchemaRenderer extends ConvenienceRenderer {
 
                 return { type: "string", format: target.jsonSchema };
             },
+            (tupleType) => {
+                if (this.tupleNeedsName(tupleType)) {
+                    return this.makeRef(tupleType);
+                }
+
+                return this.definitionForTuple(tupleType);
+            },
         );
         if (schema.$ref === undefined) {
             this.addAttributesToSchema(t, schema);
@@ -160,6 +185,27 @@ export class JSONSchemaRenderer extends ConvenienceRenderer {
         return schema;
     }
 
+    // Draft-06 tuples: `items` is the items, `additionalItems` the rest, or
+    // `false` if there is none.  `minItems` is given even if it's 0, since
+    // without it all items are taken to be present.  Constraints from the
+    // input that the shape doesn't capture, like the most elements of a
+    // tuple with a rest, are kept.
+    private definitionForTuple(t: TupleType, title?: string): Schema {
+        const [minItems, maxItems] = minMaxItemsForType(t) ?? [];
+        const rest = t.rest;
+        const schema = {
+            type: "array",
+            items: t.items.map((item) => this.schemaForType(item)),
+            additionalItems:
+                rest === undefined ? false : this.schemaForType(rest),
+            minItems: Math.max(t.minItems, minItems ?? 0),
+            maxItems: rest === undefined ? t.items.length : maxItems,
+            title,
+        };
+        this.addAttributesToSchema(t, schema);
+        return schema;
+    }
+
     private definitionForUnion(u: UnionType, title?: string): Schema {
         const oneOf = this.makeOneOf(u.sortedMembers);
         if (title !== undefined) {
@@ -199,6 +245,11 @@ export class JSONSchemaRenderer extends ConvenienceRenderer {
         this.forEachEnum("none", (e, name) => {
             const title = defined(this.names.get(name));
             definitions[title] = this.definitionForEnum(e, title);
+        });
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (t, name) => {
+            const title = defined(this.names.get(name));
+            definitions[title] = this.definitionForTuple(t, title);
         });
         schema.definitions = definitions;
 

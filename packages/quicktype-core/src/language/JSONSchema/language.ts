@@ -1,6 +1,7 @@
 import type { RenderContext } from "../../Renderer.js";
 import type { IntegerRange } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import {
     type StringTypeMapping,
     getNoStringTypeMapping,
@@ -41,6 +42,11 @@ export class JSONSchemaTargetLanguage extends TargetLanguage<
 
     public get supportsFullObjectType(): boolean {
         return true;
+    }
+
+    // `items` and `additionalItems` express every tuple.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "json-schema">(
