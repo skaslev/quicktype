@@ -770,8 +770,9 @@ export class JSONPythonRenderer extends PythonRenderer {
             (_integerType) => "int",
             (_doubleType) => "float",
             (_stringType) => "str",
-            (_arrayType) =>
-                this.pyOptions.features.builtinGenerics ? "list" : "List",
+            // isinstance needs the builtin, which every version has;
+            // typing's List isn't imported without type hints (3.5).
+            (_arrayType) => "list",
             (classType) => this.nameForNamedType(classType),
             (_mapType) => "dict",
             (enumType) => this.nameForNamedType(enumType),
