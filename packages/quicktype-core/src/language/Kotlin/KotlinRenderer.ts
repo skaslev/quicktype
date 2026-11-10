@@ -500,6 +500,9 @@ export class KotlinRenderer extends ConvenienceRenderer {
                 this.emitTopLevelMap(t, name);
             } else if (t.isPrimitive()) {
                 this.emitTopLevelPrimitive(t, name);
+            } else if (this.namedTypeToNameForTopLevel(t) === undefined) {
+                // e.g. a nullable top-level (`T | null`)
+                this.emitLine(["typealias ", name, " = ", this.kotlinType(t)]);
             }
         });
 
