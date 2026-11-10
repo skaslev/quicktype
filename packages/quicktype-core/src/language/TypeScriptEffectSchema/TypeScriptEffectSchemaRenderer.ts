@@ -124,7 +124,9 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
                 return [name];
             }
 
-            return ["S.suspend(() => ", name, ")"];
+            // The return type annotation is required when the reference is
+            // recursive (TS2506); the encoded side is left open.
+            return ["S.suspend((): S.Schema<", name, ", any> => ", name, ")"];
         }
 
         const match = matchType<Sourcelike>(
