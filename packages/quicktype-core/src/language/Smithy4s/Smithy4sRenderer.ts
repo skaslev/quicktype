@@ -12,6 +12,7 @@ import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
+    isNamedType,
     matchType,
     nullableFromUnion,
     removeNullFromUnion,
@@ -21,10 +22,11 @@ import {
     type ClassProperty,
     type ClassType,
     type EnumType,
+    isPrimitiveStringTypeKind,
     MapType,
     type ObjectType,
     type Type,
-    type UnionType,
+    UnionType,
 } from "../../Type/index.js";
 
 import { keywords } from "./constants.js";
@@ -32,9 +34,17 @@ import type { smithyOptions } from "./language.js";
 import {
     lowerNamingFunction,
     scalaNameStyle,
-    shouldAddBacktick,
     upperNamingFunction,
 } from "./utils.js";
+
+// Smithy identifiers are `(1*"_" (ALPHA / DIGIT) / ALPHA) *(ALPHA / DIGIT / "_")`
+// and can't be quoted, so replace anything else with underscores.
+function smithyIdentifier(s: string): string {
+    const name = s.replace(/[^A-Za-z0-9_]+/g, "_");
+    if (/^([A-Za-z]|_+[A-Za-z0-9])/.test(name)) return name;
+    if (/^[0-9]/.test(name)) return `_${name}`;
+    return "Empty";
+}
 
 export class Smithy4sRenderer extends ConvenienceRenderer {
     public constructor(
@@ -47,6 +57,17 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
         return keywords;
+    }
+
+    protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        // Smithy shapes aren't nullable, so a `T | null` top-level is
+        // declared as T: a class, enum or union T takes the top-level name.
+        if (type instanceof UnionType) {
+            const nullable = nullableFromUnion(type);
+            if (nullable !== null && isNamedType(nullable)) return nullable;
+        }
+
+        return super.namedTypeToNameForTopLevel(type);
     }
 
     protected forbiddenForObjectProperties(
@@ -90,15 +111,14 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
     }
 
     protected makeEnumCaseNamer(): Namer {
-        return funPrefixNamer("upper", (s) => s.replace(" ", "")); // TODO - add backticks where appropriate
+        // Enum member names must be Smithy identifiers, so e.g. "caching-yes"
+        // becomes caching_yes; the JSON value is kept as the member's value.
+        return funPrefixNamer("upper", smithyIdentifier);
     }
 
     protected emitDescriptionBlock(lines: Sourcelike[]): void {
-        this.emitCommentLines(lines, {
-            lineStart: " * ",
-            beforeComment: "/**",
-            afterComment: " */",
-        });
+        // Smithy IDL has no block comments; documentation comments are `///`.
+        this.emitCommentLines(lines, { lineStart: "/// " });
     }
 
     protected emitBlock(
@@ -144,7 +164,9 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
         const existing = this._collectionShapeNames.get(t);
         if (existing !== undefined) return existing;
 
-        const base = `${t.getCombinedName().toString()}${suffix}`;
+        const base = smithyIdentifier(
+            `${t.getCombinedName().toString()}${suffix}`,
+        );
         let name = base;
         for (let i = 2; this._usedCollectionShapeNames.has(name); i++) {
             name = `${base}${i}`;
@@ -220,6 +242,12 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
         this.emitLine("namespace ", this._scalaOptions.packageName);
         this.ensureBlankLine();
 
+        // Unions are emitted as `@untagged union`, a smithy4s (alloy) trait.
+        if (this.haveNamedUnions) {
+            this.emitLine("use alloy#untagged");
+            this.ensureBlankLine();
+        }
+
         this.emitLine("document NullValue");
         this.ensureBlankLine();
     }
@@ -234,10 +262,27 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
         this.emitLine([
             "map ",
             name,
-            " { map[ key : String , value : ",
+            " { key : String, value : ",
             elementType,
-            "}",
+            " }",
         ]);
+    }
+
+    // Smithy has no type aliases, so a primitive top-level is declared as a
+    // simple shape, e.g. `string TopLevel`.
+    protected emitTopLevelSimpleShape(t: Type, name: Name): void {
+        const shapes: Record<string, string> = {
+            any: "document",
+            bool: "boolean",
+            integer: "long",
+            double: "double",
+        };
+        const shape =
+            shapes[t.kind] ??
+            (isPrimitiveStringTypeKind(t.kind) ? "string" : undefined);
+        if (shape !== undefined) {
+            this.emitLine([shape, " ", name]);
+        }
     }
 
     protected emitEmptyClassDefinition(c: ClassType, className: Name): void {
@@ -298,14 +343,15 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
                     emit();
                 }
 
-                const nameNeedsBackticks =
-                    jsonName.endsWith("_") || shouldAddBacktick(jsonName);
-                const nameWithBackticks = nameNeedsBackticks
-                    ? `\`${jsonName}\``
-                    : jsonName;
+                // Member names must be Smithy identifiers (there is no
+                // quoting); @jsonName keeps the original JSON name.
+                const memberName = smithyIdentifier(jsonName);
                 this.emitLine(
                     p.isOptional ? "" : nullableOrOptional ? "" : "@required ",
-                    nameWithBackticks,
+                    memberName === jsonName
+                        ? ""
+                        : `@jsonName(${JSON.stringify(jsonName)}) `,
+                    memberName,
                     " : ",
                     scalaType(p),
 
@@ -422,12 +468,21 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
     protected emitSourceStructure(): void {
         this.emitHeader();
 
-        // Top-level arrays, maps
+        // Top-level arrays, maps and primitives.  Smithy shapes aren't
+        // nullable (only members are optional), so a `T | null` top-level is
+        // declared as `T`.
         this.forEachTopLevel("leading", (t, name) => {
-            if (t instanceof ArrayType) {
-                this.emitTopLevelArray(t, name);
-            } else if (t instanceof MapType) {
-                this.emitTopLevelMap(t, name);
+            const nonNull =
+                t instanceof UnionType ? (nullableFromUnion(t) ?? t) : t;
+            if (nonNull instanceof ArrayType) {
+                this.emitTopLevelArray(nonNull, name);
+            } else if (nonNull instanceof MapType) {
+                this.emitTopLevelMap(nonNull, name);
+            } else if (
+                nonNull.isPrimitive() &&
+                this.namedTypeToNameForTopLevel(t) === undefined
+            ) {
+                this.emitTopLevelSimpleShape(nonNull, name);
             }
         });
 
