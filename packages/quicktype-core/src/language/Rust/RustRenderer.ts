@@ -381,6 +381,10 @@ export class RustRenderer extends ConvenienceRenderer {
         );
     }
 
+    protected get unionDeclarationsOmitNull(): boolean {
+        return true;
+    }
+
     protected emitTopLevelAlias(t: Type, name: Name): void {
         this.emitLine("pub type ", name, " = ", this.rustType(t), ";");
     }

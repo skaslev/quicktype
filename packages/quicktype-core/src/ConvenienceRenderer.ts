@@ -73,6 +73,7 @@ import {
     isNamedType,
     matchTypeExhaustive,
     nullableFromUnion,
+    removeNullFromUnion,
     separateNamedTypes,
 } from "./Type/TypeUtils.js";
 
@@ -261,6 +262,16 @@ export abstract class ConvenienceRenderer extends Renderer {
             return undefined;
         }
 
+        if (
+            type instanceof UnionType &&
+            this.unionDeclarationsOmitNull &&
+            removeNullFromUnion(type)[0] !== null
+        ) {
+            // The declaration of `A | B | null` would only cover `A | B`,
+            // so the top-level is an alias that adds the null back.
+            return undefined;
+        }
+
         if (isNamedType(type)) {
             return type;
         }
@@ -284,6 +295,14 @@ export abstract class ConvenienceRenderer extends Renderer {
         return panic(
             "If needsTypeDeclarationBeforeUse returns true, canBeForwardDeclared must be implemented",
         );
+    }
+
+    /**
+     * Whether union declarations leave out `null`, with references adding it
+     * back (as in Rust's `Option<Union>`).
+     */
+    protected get unionDeclarationsOmitNull(): boolean {
+        return false;
     }
 
     protected unionNeedsName(u: UnionType): boolean {
