@@ -17,6 +17,7 @@ import {
     type TypeAttributes,
     combineTypeAttributes,
     emptyTypeAttributes,
+    increaseTypeAttributesDistance,
     makeTypeAttributesInferred,
 } from "../attributes/TypeAttributes.js";
 import type { GraphRewriteBuilder, TypeLookerUp } from "../GraphRewriting.js";
@@ -28,7 +29,7 @@ import {
     ObjectType,
     type PrimitiveTypeKind,
     TupleType,
-    type Type,
+    Type,
     type TypeKind,
     UnionType,
     isNumberTypeKind,
@@ -67,14 +68,92 @@ function attributesForTypes<T extends TypeKind>(
     );
 }
 
-type PropertyMap = Map<string, GenericClassProperty<Set<Type>>>;
+// A type that a value must have, or a set of types, one of which it must
+// have, from object types that a union keeps apart.
+type TypeTerm = Type | ReadonlySet<Type>;
+
+type PropertyMap = Map<string, GenericClassProperty<Set<TypeTerm>>>;
+
+type ObjectData = [PropertyMap, ReadonlySet<TypeTerm> | undefined] | undefined;
+
+function typeTerm(types: ReadonlySet<Type>): TypeTerm {
+    return types.size === 1 ? defined(iterableFirst(types)) : types;
+}
+
+// The properties, additional properties, and attributes of the object types
+// in a union.  A union only has more than one if it keeps them apart, see
+// `distinctObjectGroups`.  Intersections unify them, though, like `unifyTypes`
+// would: intersecting with each of them would distribute the intersection
+// over the union, and could make object types that are impossible.
+function unifyObjects(
+    objects: readonly ObjectType[],
+): [
+    ReadonlyMap<string, GenericClassProperty<TypeTerm>>,
+    TypeTerm | undefined,
+    TypeAttributes,
+] {
+    if (objects.length === 1) {
+        const o = objects[0];
+        return [
+            mapMap(
+                o.getProperties(),
+                (cp) =>
+                    new GenericClassProperty<TypeTerm>(cp.type, cp.isOptional),
+            ),
+            o.getAdditionalProperties(),
+            o.getAttributes(),
+        ];
+    }
+
+    const propertyNames = new Set<string>();
+    for (const o of objects) {
+        setUnionInto(propertyNames, o.getProperties().keys());
+    }
+
+    const properties = new Map<string, GenericClassProperty<TypeTerm>>();
+    for (const name of propertyNames) {
+        const types = new Set<Type>();
+        let isOptional = false;
+        for (const o of objects) {
+            const property = o.getProperties().get(name);
+            const additional = o.getAdditionalProperties();
+            if (property !== undefined) {
+                types.add(property.type);
+                isOptional = isOptional || property.isOptional;
+            } else {
+                isOptional = true;
+                if (additional !== undefined && additional.kind !== "any") {
+                    types.add(additional);
+                }
+            }
+        }
+
+        properties.set(
+            name,
+            new GenericClassProperty(typeTerm(types), isOptional),
+        );
+    }
+
+    const additionalTypes = new Set<Type>();
+    for (const o of objects) {
+        const additional = o.getAdditionalProperties();
+        if (additional !== undefined) additionalTypes.add(additional);
+    }
+
+    return [
+        properties,
+        additionalTypes.size === 0 ? undefined : typeTerm(additionalTypes),
+        increaseTypeAttributesDistance(
+            combineTypeAttributes(
+                "union",
+                objects.map((o) => o.getAttributes()),
+            ),
+        ),
+    ];
+}
 
 class IntersectionAccumulator
-    implements
-        UnionTypeProvider<
-            ReadonlySet<Type>,
-            [PropertyMap, ReadonlySet<Type> | undefined] | undefined
-        >
+    implements UnionTypeProvider<ReadonlySet<Type>, ObjectData>
 {
     private _primitiveTypes: Set<PrimitiveTypeKind> | undefined;
 
@@ -105,7 +184,7 @@ class IntersectionAccumulator
 
     private _objectAttributes: TypeAttributes = emptyTypeAttributes;
 
-    private _additionalPropertyTypes: Set<Type> | undefined = new Set();
+    private _additionalPropertyTypes: Set<TypeTerm> | undefined = new Set();
 
     private _lostTypeAttributes = false;
 
@@ -187,23 +266,22 @@ class IntersectionAccumulator
     }
 
     private updateObjectProperties(members: Iterable<Type>): void {
-        const maybeObject = iterableFind(
-            members,
-            (t) => t instanceof ObjectType,
-        ) as ObjectType | undefined;
-        if (maybeObject === undefined) {
+        const objects = Array.from(members).filter(
+            (t): t is ObjectType => t instanceof ObjectType,
+        );
+        if (objects.length === 0) {
             this._objectProperties = undefined;
             this._additionalPropertyTypes = undefined;
             return;
         }
 
+        const [objectProperties, objectAdditionalProperties, attributes] =
+            unifyObjects(objects);
         this._objectAttributes = combineTypeAttributes(
             "intersect",
             this._objectAttributes,
-            maybeObject.getAttributes(),
+            attributes,
         );
-        const objectAdditionalProperties =
-            maybeObject.getAdditionalProperties();
 
         if (this._objectProperties === undefined) {
             assert(this._additionalPropertyTypes === undefined);
@@ -212,18 +290,18 @@ class IntersectionAccumulator
 
         const allPropertyNames = setUnionInto(
             new Set(this._objectProperties.keys()),
-            maybeObject.getProperties().keys(),
+            objectProperties.keys(),
         );
         for (const name of allPropertyNames) {
             const existing = defined(this._objectProperties).get(name);
-            const newProperty = maybeObject.getProperties().get(name);
+            const newProperty = objectProperties.get(name);
 
             // A property declared by any intersection member is known on
             // the merged object.  A member that doesn't allow additional
             // properties must not discard properties declared by others.
             if (existing !== undefined && newProperty !== undefined) {
                 const cp = new GenericClassProperty(
-                    existing.typeData.add(newProperty.type),
+                    existing.typeData.add(newProperty.typeData),
                     existing.isOptional && newProperty.isOptional,
                 );
                 defined(this._objectProperties).set(name, cp);
@@ -239,9 +317,9 @@ class IntersectionAccumulator
             } else if (newProperty !== undefined) {
                 const types =
                     this._additionalPropertyTypes === undefined
-                        ? new Set([newProperty.type])
+                        ? new Set([newProperty.typeData])
                         : new Set(this._additionalPropertyTypes).add(
-                              newProperty.type,
+                              newProperty.typeData,
                           );
                 defined(this._objectProperties).set(
                     name,
@@ -332,9 +410,7 @@ class IntersectionAccumulator
         return this._tuples;
     }
 
-    public get objectData():
-        | [PropertyMap, ReadonlySet<Type> | undefined]
-        | undefined {
+    public get objectData(): ObjectData {
         if (this._objectProperties === undefined) {
             assert(this._additionalPropertyTypes === undefined);
             return undefined;
@@ -404,16 +480,23 @@ class IntersectionAccumulator
 class IntersectionUnionBuilder extends UnionBuilder<
     TypeBuilder & TypeLookerUp,
     ReadonlySet<Type>,
-    [PropertyMap, ReadonlySet<Type> | undefined] | undefined
+    ObjectData
 > {
     private _createdNewIntersections = false;
 
     private makeIntersection(
-        members: ReadonlySet<Type>,
+        members: ReadonlySet<TypeTerm>,
         attributes: TypeAttributes,
     ): TypeRef {
         const reconstitutedMembers = setMap(members, (t) =>
-            this.typeBuilder.reconstituteTypeRef(t.typeRef),
+            t instanceof Type
+                ? this.typeBuilder.reconstituteTypeRef(t.typeRef)
+                : this.typeBuilder.getUnionType(
+                      emptyTypeAttributes,
+                      setMap(t, (m) =>
+                          this.typeBuilder.reconstituteTypeRef(m.typeRef),
+                      ),
+                  ),
         );
 
         const first = defined(iterableFirst(reconstitutedMembers));
@@ -434,7 +517,7 @@ class IntersectionUnionBuilder extends UnionBuilder<
     }
 
     protected makeObject(
-        maybeData: [PropertyMap, ReadonlySet<Type> | undefined] | undefined,
+        maybeData: ObjectData,
         typeAttributes: TypeAttributes,
         forwardingRef: TypeRef | undefined,
     ): TypeRef {
@@ -482,10 +565,7 @@ class IntersectionUnionBuilder extends UnionBuilder<
     }
 
     protected makeTuple(
-        typeProvider: UnionTypeProvider<
-            ReadonlySet<Type>,
-            [PropertyMap, ReadonlySet<Type> | undefined] | undefined
-        >,
+        typeProvider: UnionTypeProvider<ReadonlySet<Type>, ObjectData>,
         allTuples: readonly TupleType[],
         typeAttributes: TypeAttributes,
         forwardingRef: TypeRef | undefined,

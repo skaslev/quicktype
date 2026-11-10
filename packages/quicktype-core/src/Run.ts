@@ -248,6 +248,8 @@ class Run implements RunContext {
         typeBuilder.tupleSupport = targetLanguage.tupleSupport;
         typeBuilder.supportsRecursiveUnions =
             targetLanguage.supportsRecursiveUnions;
+        typeBuilder.makesDistinctObjects =
+            targetLanguage.supportsUnionsWithMultipleClasses;
 
         return {
             targetLanguage,

@@ -31,6 +31,7 @@ import {
 } from "../attributes/Constraints.js";
 import { defaultValueAttributeProducer } from "../attributes/DefaultValue.js";
 import { descriptionAttributeProducer } from "../attributes/Description.js";
+import { makeDistinctObjectAttributes } from "../attributes/DistinctObjects.js";
 import { enumValuesAttributeProducer } from "../attributes/EnumValues.js";
 import { StringTypes } from "../attributes/StringTypes.js";
 import {
@@ -1319,11 +1320,22 @@ async function addTypesInSchema(
                 additionalProperties = schema.unevaluatedProperties;
             }
 
-            const objectAttributes = combineTypeAttributes(
-                "union",
+            // Unions keep the object types of different schemas apart if
+            // the target can tell them apart, which it can by their
+            // properties if they don't allow any others.  quicktype ignores
+            // pattern properties other than `.*`, so it would take an
+            // object with them for one without additional properties.
+            const isDistinct =
+                typeBuilder.makesDistinctObjects &&
+                additionalProperties === false &&
+                schema.patternProperties === undefined;
+            const objectAttributes = combineTypeAttributes("union", [
                 inferredAttributes,
                 combineProducedAttributes(({ forObject }) => forObject),
-            );
+                isDistinct
+                    ? makeDistinctObjectAttributes()
+                    : emptyTypeAttributes,
+            ]);
             const order = schema.quicktypePropertyOrder
                 ? schema.quicktypePropertyOrder
                 : [];

@@ -111,6 +111,17 @@ export abstract class TargetLanguage<
         return false;
     }
 
+    /**
+     * Whether a union can have several classes, for renderers that can tell
+     * them apart.  Unions then keep the object types of different JSON
+     * Schema object schemas that forbid additional properties apart, such
+     * as the branches of a `oneOf`, instead of unifying them into a single
+     * class with the properties of all of them.
+     */
+    public get supportsUnionsWithMultipleClasses(): boolean {
+        return false;
+    }
+
     public get supportsFullObjectType(): boolean {
         return false;
     }

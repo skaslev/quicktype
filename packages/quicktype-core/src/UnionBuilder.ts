@@ -6,6 +6,11 @@ import {
 } from "collection-utils";
 
 import {
+    distinctObjectGroups,
+    distinctObjectTypeAttributeKind,
+    isDistinctObject,
+} from "./attributes/DistinctObjects.js";
+import {
     StringTypes,
     stringTypesTypeAttributeKind,
 } from "./attributes/StringTypes.js";
@@ -53,6 +58,15 @@ export interface UnionTypeProvider<TArrayData, TObjectData> {
     readonly lostTypeAttributes: boolean;
 
     readonly objectData: TObjectData;
+
+    /**
+     * The object members and their attributes, if the union keeps several
+     * apart, see `distinctObjectGroups`.  Otherwise the union has at most
+     * one object member, made from `objectData`.
+     */
+    readonly objectGroups?: ReadonlyArray<
+        readonly [TObjectData, TypeAttributes]
+    >;
 }
 
 export type TypeAttributeMap<T extends TypeKind> = Map<T, TypeAttributes>;
@@ -159,6 +173,9 @@ export class UnionAccumulator<TArray, TObject>
     public readonly tupleAttributes: TypeAttributes[] = [];
 
     public readonly objectData: TObject[] = [];
+
+    // The attributes of each of `objectData`.
+    private readonly _objectAttributes: TypeAttributes[] = [];
 
     private readonly _enumCases: Set<string> = new Set();
 
@@ -281,6 +298,7 @@ export class UnionAccumulator<TArray, TObject>
 
     public addObject(t: TObject, attributes: TypeAttributes): void {
         this.objectData.push(t);
+        this._objectAttributes.push(attributes);
         addAttributesToBuilder(
             this._nonStringTypeAttributes,
             "object",
@@ -395,7 +413,33 @@ export class UnionAccumulator<TArray, TObject>
             moveAttributes(merged, "map", "class");
         }
 
+        // Object types unified with one that isn't a distinct object type
+        // don't make a distinct one either.
+        const objectAttributes = merged.get("object");
+        if (
+            objectAttributes !== undefined &&
+            isDistinctObject(objectAttributes) &&
+            !this._objectAttributes.every(isDistinctObject)
+        ) {
+            merged.set(
+                "object",
+                distinctObjectTypeAttributeKind.removeInAttributes(
+                    objectAttributes,
+                ),
+            );
+        }
+
         return merged;
+    }
+
+    public get objectGroups(): Array<[TObject[], TypeAttributes]> | undefined {
+        const groups = distinctObjectGroups(this._objectAttributes);
+        if (groups === undefined) return undefined;
+
+        return groups.map((group) => [
+            group.map((i) => this.objectData[i]),
+            unionTypeAttributes(group.map((i) => this._objectAttributes[i])),
+        ]);
     }
 
     public get lostTypeAttributes(): boolean {
@@ -637,6 +681,9 @@ export abstract class UnionBuilder<
         forwardingRef?: TypeRef,
     ): TypeRef {
         const kinds = typeProvider.getMemberKinds();
+        const objectGroups = kinds.has("object")
+            ? typeProvider.objectGroups
+            : undefined;
 
         if (typeProvider.lostTypeAttributes) {
             this.typeBuilder.setLostTypeAttributes();
@@ -649,7 +696,11 @@ export abstract class UnionBuilder<
         const tupleGroups = kinds.has("tuple")
             ? tupleShapeGroups(typeProvider.tupleData)
             : [];
-        if (kinds.size === 1 && tupleGroups.length <= 1) {
+        if (
+            kinds.size === 1 &&
+            tupleGroups.length <= 1 &&
+            objectGroups === undefined
+        ) {
             const [[kind, memberAttributes]] = Array.from(kinds);
             const allAttributes = combineTypeAttributes(
                 "union",
@@ -697,6 +748,18 @@ export abstract class UnionBuilder<
                             attributes,
                             undefined,
                         ),
+                    );
+                }
+
+                continue;
+            }
+
+            if (kind === "object" && objectGroups !== undefined) {
+                // Each object member keeps the attributes of its own
+                // object types.
+                for (const [objectData, attributes] of objectGroups) {
+                    types.push(
+                        this.makeObject(objectData, attributes, undefined),
                     );
                 }
 
