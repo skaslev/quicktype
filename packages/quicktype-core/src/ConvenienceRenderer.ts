@@ -254,6 +254,13 @@ export abstract class ConvenienceRenderer extends Renderer {
     }
 
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        if (type instanceof UnionType && !this.unionNeedsName(type)) {
+            // Nullable unions (`T | null`) are never declared as named
+            // types, so lending them the top-level name would leave it
+            // undeclared.  Let the renderer emit an alias instead.
+            return undefined;
+        }
+
         if (isNamedType(type)) {
             return type;
         }
