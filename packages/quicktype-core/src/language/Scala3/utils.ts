@@ -80,7 +80,8 @@ export const wrapOption = (s: string, optional: boolean): string => {
  * "5"), and a case class whose fields are all defaulted can spuriously
  * read non-object JSON with upickle, so try the most discriminating
  * decoders first -- enums (which accept only their known strings), then
- * strings, then the other primitives, classes last.
+ * strings, then the other primitives, tuples (which accept only their
+ * length) before arrays, classes last.
  */
 export const unionMemberSortOrder = (_: Name, t: Type): string => {
     const priority: Partial<Record<Type["kind"], string>> = {
@@ -89,11 +90,12 @@ export const unionMemberSortOrder = (_: Name, t: Type): string => {
         bool: "3",
         integer: "4",
         double: "5",
-        array: "6",
-        map: "7",
-        class: "9",
+        tuple: "6",
+        array: "7",
+        map: "8",
+        class: "A",
     };
-    return `${priority[t.kind] ?? "8"}${t.kind}`;
+    return `${priority[t.kind] ?? "9"}${t.kind}`;
 };
 
 function isPartCharacter(codePoint: number): boolean {

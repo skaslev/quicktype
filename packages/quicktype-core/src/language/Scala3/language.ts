@@ -8,6 +8,7 @@ import {
 } from "../../RendererOptions/index.js";
 import { assertNever } from "../../support/Support.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
 import { CirceRenderer } from "./CirceRenderer.js";
@@ -58,6 +59,12 @@ export class Scala3TargetLanguage extends TargetLanguage<
 
     public get supportsUnionsWithBothNumberTypes(): boolean {
         return true;
+    }
+
+    // circe and upickle (de)serialize tuples as arrays of exactly their
+    // length.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
     }
 
     protected makeRenderer<Lang extends LanguageName = "scala3">(

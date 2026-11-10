@@ -10,6 +10,7 @@ import type {
     ClassType,
     EnumType,
     MapType,
+    TupleType,
     Type,
     UnionType,
 } from "../../Type/index.js";
@@ -99,6 +100,13 @@ export class CirceRenderer extends Scala3Renderer {
                 paramName,
                 ")",
             ],
+            (tupleType) => [
+                "Encoder[",
+                this.scalaType(tupleType),
+                "].apply(",
+                paramName,
+                ")",
+            ],
         );
     }
 
@@ -169,6 +177,33 @@ export class CirceRenderer extends Scala3Renderer {
                 "given io.circe.Codec.AsObject[",
                 className,
                 "] = io.circe.derivation.ConfiguredCodec.derived",
+            ]);
+        });
+        this.ensureBlankLine();
+    }
+
+    // In JSON the case class is the tuple of its fields.  The tuple's codecs
+    // are summoned when they're used: when the givens are created, they'd
+    // need these givens, which aren't there yet.
+    protected emitTupleCaseClassCodecs(t: TupleType, tupleName: Name): void {
+        this.ensureBlankLine();
+        this.emitLine(["object ", tupleName, ":"]);
+        this.indent(() => {
+            this.emitLine([
+                "given Encoder[",
+                tupleName,
+                "] = Encoder.instance(t => ",
+                this.tupleOfCaseClass(t, "t"),
+                ".asJson)",
+            ]);
+            this.emitLine([
+                "given Decoder[",
+                tupleName,
+                "] = Decoder.instance(_.as[",
+                this.tupleSource(t),
+                "].map(t => ",
+                this.caseClassOfTuple(t, tupleName, "t"),
+                "))",
             ]);
         });
         this.ensureBlankLine();

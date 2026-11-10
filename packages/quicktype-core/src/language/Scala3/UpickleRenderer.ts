@@ -1,7 +1,13 @@
 import type { Name } from "../../Naming.js";
 import type { Sourcelike } from "../../Source.js";
 import { removeNullFromUnion } from "../../Type/TypeUtils.js";
-import type { ClassType, EnumType, Type, UnionType } from "../../Type/index.js";
+import type {
+    ClassType,
+    EnumType,
+    TupleType,
+    Type,
+    UnionType,
+} from "../../Type/index.js";
 import { stringEscape, utf16StringEscape } from "../../support/Strings.js";
 
 import { Scala3Renderer } from "./Scala3Renderer.js";
@@ -121,6 +127,42 @@ given OptionPickler.Reader[Long] = JsonExt.strictLong
     ): void {
         super.emitEmptyClassDefinition(c, className);
         this.emitItem(" derives OptionPickler.ReadWriter");
+        this.ensureBlankLine();
+    }
+
+    // In JSON the case class is the tuple of its fields.  The tuple's
+    // ReadWriter is summoned when it's used: when the given is created, it'd
+    // need this given, which isn't there yet.
+    protected override emitTupleCaseClassCodecs(
+        t: TupleType,
+        tupleName: Name,
+    ): void {
+        this.ensureBlankLine();
+        this.emitLine(["object ", tupleName, ":"]);
+        this.indent(() => {
+            this.emitLine([
+                "given OptionPickler.ReadWriter[",
+                tupleName,
+                "] = OptionPickler.readwriter[ujson.Value].bimap[",
+                tupleName,
+                "](",
+            ]);
+            this.indent(() => {
+                this.emitLine([
+                    "t => OptionPickler.writeJs(",
+                    this.tupleOfCaseClass(t, "t"),
+                    "),",
+                ]);
+                this.emitLine([
+                    "json => { val t = OptionPickler.read[",
+                    this.tupleSource(t),
+                    "](json); ",
+                    this.caseClassOfTuple(t, tupleName, "t"),
+                    " }",
+                ]);
+            });
+            this.emitLine(")");
+        });
         this.ensureBlankLine();
     }
 

@@ -1,3 +1,5 @@
+import { arrayIntercalate } from "collection-utils";
+
 import {
     anyTypeIssueAnnotation,
     nullTypeIssueAnnotation,
@@ -23,6 +25,7 @@ import {
     type EnumType,
     MapType,
     type ObjectType,
+    type TupleType,
     type Type,
     type UnionType,
 } from "../../Type/index.js";
@@ -197,7 +200,37 @@ export class Scala3Renderer extends ConvenienceRenderer {
                 transformed.kind === "uuid"
                     ? "java.util.UUID"
                     : "java.time.Instant",
+            (tupleType) =>
+                this.tupleNeedsName(tupleType)
+                    ? this.nameForNamedType(tupleType)
+                    : this.tupleSource(tupleType, withIssues),
         );
+    }
+
+    // Tuples are spelled out, `(A, B)`, unless the schema names them or
+    // they contain themselves.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return this.hasGivenName(t) || this.tupleIsCaseClass(t);
+    }
+
+    /**
+     * Whether a tuple is declared as a case class instead of a type alias:
+     * a type alias can't refer to itself, other than through a class or an
+     * enum.  Unions are type aliases too.
+     */
+    protected tupleIsCaseClass(t: TupleType): boolean {
+        return this.isInCycleThrough(
+            t,
+            (c) => !["class", "enum"].includes(c.kind),
+        );
+    }
+
+    /** `(A, B)`; Scala has no literal syntax for a one-element tuple. */
+    protected tupleSource(t: TupleType, withIssues = false): Sourcelike {
+        const items = t.items.map((item) => this.scalaType(item, withIssues));
+        return items.length === 1
+            ? ["Tuple1[", items[0], "]"]
+            : ["(", ...arrayIntercalate(", ", items), ")"];
     }
 
     protected emitUsageHeader(): void {
@@ -340,6 +373,53 @@ export class Scala3Renderer extends ConvenienceRenderer {
         this.emitLine(")");
     }
 
+    protected emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        if (!this.tupleIsCaseClass(t)) {
+            this.emitLine("type ", tupleName, " = ", this.tupleSource(t, true));
+            return;
+        }
+
+        // The fields are named like a tuple's.
+        const fields = t.items.map(
+            (item, i): Sourcelike => [
+                `_${i + 1}: `,
+                this.scalaType(item, true),
+            ],
+        );
+        this.emitLine(
+            "case class ",
+            tupleName,
+            "(",
+            ...arrayIntercalate(", ", fields),
+            ")",
+        );
+        this.emitTupleCaseClassCodecs(t, tupleName);
+    }
+
+    protected emitTupleCaseClassCodecs(_t: TupleType, _tupleName: Name): void {
+        // Overridden by frameworks, which (de)serialize the case class as
+        // the tuple it stands for.
+    }
+
+    /** `(x._1, x._2)` for a case class standing for a tuple. */
+    protected tupleOfCaseClass(t: TupleType, value: string): Sourcelike {
+        const fields = t.items.map((_, i) => `${value}._${i + 1}`);
+        return fields.length === 1
+            ? ["Tuple1(", fields[0], ")"]
+            : ["(", fields.join(", "), ")"];
+    }
+
+    /** `Node(t._1, t._2)`, from a tuple of the case class's fields. */
+    protected caseClassOfTuple(
+        t: TupleType,
+        tupleName: Name,
+        value: string,
+    ): Sourcelike {
+        const fields = t.items.map((_, i) => `${value}._${i + 1}`);
+        return [tupleName, "(", fields.join(", "), ")"];
+    }
+
     protected emitEnumDefinition(e: EnumType, enumName: Name): void {
         this.emitDescription(this.descriptionForType(e));
 
@@ -402,6 +482,7 @@ export class Scala3Renderer extends ConvenienceRenderer {
             (c: ClassType, n: Name) => this.emitClassDefinition(c, n),
             (e, n) => this.emitEnumDefinition(e, n),
             (u, n) => this.emitUnionDefinition(u, n),
+            (t, n) => this.emitTupleDefinition(t, n),
         );
     }
 }
