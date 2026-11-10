@@ -1,4 +1,4 @@
-import { arrayIntercalate } from "collection-utils";
+import { arrayIntercalate, setUnion, setUnionInto } from "collection-utils";
 
 import {
     minMaxItemsForType,
@@ -7,7 +7,12 @@ import {
     patternForType,
 } from "../../attributes/Constraints.js";
 import { ConvenienceRenderer } from "../../ConvenienceRenderer.js";
-import { type Name, type Namer, funPrefixNamer } from "../../Naming.js";
+import {
+    DependencyName,
+    type Name,
+    type Namer,
+    funPrefixNamer,
+} from "../../Naming.js";
 import type { RenderContext } from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import type { Sourcelike } from "../../Source.js";
@@ -30,13 +35,45 @@ import type {
     ObjectType,
     Type,
 } from "../../Type/index.js";
-import { matchType } from "../../Type/TypeUtils.js";
+import {
+    directlyReachableTypes,
+    matchType,
+    removeNullFromUnion,
+} from "../../Type/TypeUtils.js";
 import { legalizeName } from "../JavaScript/utils.js";
 
 import type { typeScriptEffectSchemaOptions } from "./language.js";
 
+function isClass(t: Type): t is ObjectType {
+    return t.kind === "class" || t.kind === "object";
+}
+
+// The classes a class's properties refer to, through arrays, maps and unions.
+function referencedClasses(t: Type): ReadonlySet<Type> {
+    if (!isClass(t)) return new Set();
+    return setUnion(
+        ...Array.from(t.getProperties().values(), (p) =>
+            directlyReachableTypes(p.type, (u) =>
+                isClass(u) ? new Set([u]) : null,
+            ),
+        ),
+    );
+}
+
+// S.Union lists classes last.
+function unionMemberRank(t: Type): number {
+    return isClass(t) ? 1 : 0;
+}
+
 export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
     private readonly emittedObjects = new Set<Name>();
+
+    private _cyclicClasses: ReadonlySet<Type> | undefined;
+
+    // The `<Class>Encoded` interfaces of the classes in cycles.
+    private readonly encodedNames = new Map<Type, Name>();
+
+    private readonly encodedNamer = this.makeNamedTypeNamer();
 
     public constructor(
         targetLanguage: TargetLanguage,
@@ -93,6 +130,41 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         return funPrefixNamer("enum-cases", (s) => this.nameStyle(s, false));
     }
 
+    // The classes that refer to themselves, directly or through other
+    // classes.
+    private get cyclicClasses(): ReadonlySet<Type> {
+        if (this._cyclicClasses === undefined) {
+            const cyclic = new Set<Type>();
+            const components = this.typeGraph
+                .makeGraph(false, referencedClasses)
+                .stronglyConnectedComponents().nodes;
+            for (const component of components) {
+                const [first] = component;
+                if (component.size > 1 || referencedClasses(first).has(first)) {
+                    setUnionInto(cyclic, component);
+                }
+            }
+
+            this._cyclicClasses = cyclic;
+        }
+
+        return this._cyclicClasses;
+    }
+
+    protected makeNamedTypeDependencyNames(
+        t: Type,
+        name: Name,
+    ): DependencyName[] {
+        if (!this.cyclicClasses.has(t)) return [];
+        const encodedName = new DependencyName(
+            this.encodedNamer,
+            name.order,
+            (lookup) => `${lookup(name)}_encoded`,
+        );
+        this.encodedNames.set(t, encodedName);
+        return [encodedName];
+    }
+
     private importStatement(
         lhs: Sourcelike,
         moduleName: Sourcelike,
@@ -124,9 +196,23 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
                 return [name];
             }
 
-            // The return type annotation is required when the reference is
-            // recursive (TS2506); the encoded side is left open.
-            return ["S.suspend((): S.Schema<", name, ", any> => ", name, ")"];
+            // TypeScript infers the type of a forward reference, unless the
+            // reference is recursive (TS2506).  Then it's annotated, with the
+            // encoded side declared by the class's encoded interface.
+            const encodedName = this.encodedNames.get(t);
+            if (encodedName === undefined) {
+                return ["S.suspend(() => ", name, ")"];
+            }
+
+            return [
+                "S.suspend((): S.Schema<",
+                name,
+                ", ",
+                encodedName,
+                "> => ",
+                name,
+                ")",
+            ];
         }
 
         const match = matchType<Sourcelike>(
@@ -165,9 +251,7 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
                 const coerce = types.some(
                     (type) => type.kind === "bool" || type.kind === "integer",
                 );
-                const rank = (type: Type): number =>
-                    type.kind === "class" || type.kind === "object" ? 1 : 0;
-                types.sort((a, b) => rank(a) - rank(b));
+                types.sort((a, b) => unionMemberRank(a) - unionMemberRank(b));
                 const children: Sourcelike[] = [];
                 let nullable = false;
                 for (const type of types) {
@@ -215,6 +299,79 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         return match;
     }
 
+    // The encoded type of the schema typeMapTypeFor renders for `t`.
+    private encodedTypeFor(t: Type): Sourcelike {
+        if (t.kind === "class" || t.kind === "object" || t.kind === "enum") {
+            const encodedName = this.encodedNames.get(t);
+            if (encodedName !== undefined) {
+                return encodedName;
+            }
+
+            return ["S.Schema.Encoded<typeof ", this.nameForNamedType(t), ">"];
+        }
+
+        return matchType<Sourcelike>(
+            t,
+            (_anyType) => "any",
+            (_nullType) => "null",
+            (_boolType) => "boolean",
+            (_integerType) => "number",
+            (_doubleType) => "number",
+            (_stringType) => "string",
+            (arrayType) => [
+                "ReadonlyArray<",
+                this.encodedTypeFor(arrayType.items),
+                ">",
+            ],
+            (_classType) => panic("Should already be handled."),
+            (mapType) => [
+                "{ readonly [key: string]: ",
+                this.encodedTypeFor(mapType.values),
+                " }",
+            ],
+            (_enumType) => panic("Should already be handled."),
+            (unionType) => {
+                const [nullType, members] = removeNullFromUnion(
+                    unionType,
+                    true,
+                );
+                const types = Array.from(members).sort(
+                    (a, b) => unionMemberRank(a) - unionMemberRank(b),
+                );
+                const encoded = types.map((type) => this.encodedTypeFor(type));
+                if (nullType !== null) {
+                    encoded.push("null");
+                }
+
+                return arrayIntercalate(" | ", encoded);
+            },
+            // Both the plain and the coercing schemas encode strings.
+            (transformedStringType) =>
+                transformedStringType.kind === "bool-string"
+                    ? '"true" | "false"'
+                    : "string",
+        );
+    }
+
+    // What the class's schema encodes to: `S.Schema.Encoded<typeof X>`, which
+    // can't be used inside X's own definition.
+    private emitEncodedInterface(encodedName: Name, t: ObjectType): void {
+        this.emitLine("\nexport interface ", encodedName, " {");
+        this.indent(() => {
+            this.forEachClassProperty(t, "none", (_, jsonName, property) => {
+                const optional = property.isOptional;
+                this.emitLine(
+                    `readonly "${utf16StringEscape(jsonName)}"`,
+                    optional ? "?: " : ": ",
+                    this.encodedTypeFor(property.type),
+                    optional ? " | undefined" : "",
+                    ";",
+                );
+            });
+        });
+        this.emitLine("}");
+    }
+
     private stringSchema(t: Type): Sourcelike {
         const [min, max] = minMaxLengthForType(t) ?? [];
         const pattern = patternForType(t);
@@ -246,6 +403,11 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
 
     private emitObject(name: Name, t: ObjectType): void {
         this.ensureBlankLine();
+        const encodedName = this.encodedNames.get(t);
+        if (encodedName !== undefined) {
+            this.emitEncodedInterface(encodedName, t);
+        }
+
         this.emitLine(
             "\nexport class ",
             name,

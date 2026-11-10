@@ -88,7 +88,7 @@ test("a reference around a cycle is suspended", async () => {
     });
     expect(classOrder(output)).toEqual(["Leaf", "Node", "TopLevel"]);
     expect(output).toContain(
-        '"children": S.Array(S.suspend((): S.Schema<Node, any> => Node)),',
+        '"children": S.Array(S.suspend((): S.Schema<Node, NodeEncoded> => Node)),',
     );
     expect(output).toContain('"leaf": Leaf,');
     expect(output).toContain('"node": Node,');

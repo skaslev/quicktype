@@ -50,6 +50,6 @@ test("annotates suspended references", async () => {
         recursiveSchema,
     );
     expect(output).toContain(
-        "S.suspend((): S.Schema<TopLevel, any> => TopLevel)",
+        "S.suspend((): S.Schema<TopLevel, TopLevelEncoded> => TopLevel)",
     );
 });
