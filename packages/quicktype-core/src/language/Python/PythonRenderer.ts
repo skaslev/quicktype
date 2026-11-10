@@ -581,6 +581,21 @@ export class PythonRenderer extends ConvenienceRenderer {
             );
         });
 
+        // Aliases for top-levels that aren't classes or enums.  Unions aren't
+        // declared in Python, so a union top-level is aliased too.  They come
+        // after the declarations they refer to.  Without type hints (Python
+        // 3.5) there's nothing to alias: the types aren't imported.
+        const aliasLines = this.gatherSource(() => {
+            if (!this.pyOptions.features.typeHints) return;
+            this.forEachTopLevel(
+                "leading",
+                (t, name) =>
+                    this.emitLine(name, " = ", this.pythonType(t, false, true)),
+                (t) =>
+                    this.namedTypeToNameForTopLevel(t) === undefined ||
+                    t instanceof UnionType,
+            );
+        });
         const closingLines = this.gatherSource(() => this.emitClosingCode());
         const supportLines = this.gatherSource(() => this.emitSupportCode());
 
@@ -594,6 +609,8 @@ export class PythonRenderer extends ConvenienceRenderer {
         this.emitGatheredSource(supportLines);
         this.ensureBlankLine(2);
         this.emitGatheredSource(declarationLines);
+        this.ensureBlankLine(2);
+        this.emitGatheredSource(aliasLines);
         this.ensureBlankLine(2);
         this.emitGatheredSource(closingLines);
     }
