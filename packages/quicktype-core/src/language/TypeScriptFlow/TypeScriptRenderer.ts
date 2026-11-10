@@ -8,7 +8,12 @@ import {
     singleWord,
 } from "../../Source.js";
 import { camelCase, utf16StringEscape } from "../../support/Strings.js";
-import type { ArrayType, ClassType, EnumType, Type } from "../../Type/index.js";
+import {
+    type ArrayType,
+    type ClassType,
+    EnumType,
+    type Type,
+} from "../../Type/index.js";
 import { isNamedType } from "../../Type/TypeUtils.js";
 import type { JavaScriptTypeAnnotations } from "../JavaScript/index.js";
 
@@ -127,11 +132,25 @@ export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
         );
     }
 
-    protected emitEnum(e: EnumType, enumName: Name): void {
-        this.emitDescription(this.descriptionForType(e));
+    // With `prefer-const-values` an enum with one case isn't declared (its
+    // value is used instead), so a top-level of that type is an alias.
+    protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        if (
+            this._tsFlowOptions.preferConstValues &&
+            type instanceof EnumType &&
+            type.cases.size === 1
+        ) {
+            return undefined;
+        }
 
+        return super.namedTypeToNameForTopLevel(type);
+    }
+
+    protected emitEnum(e: EnumType, enumName: Name): void {
         // enums with only one value are emitted as constants
         if (this._tsFlowOptions.preferConstValues && e.cases.size === 1) return;
+
+        this.emitDescription(this.descriptionForType(e));
 
         if (this._tsFlowOptions.preferUnions) {
             let items = "";
