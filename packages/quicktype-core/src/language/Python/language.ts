@@ -8,6 +8,7 @@ import {
 } from "../../RendererOptions/index.js";
 import type { IntegerRange } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import {
     type PrimitiveStringTypeKind,
@@ -127,6 +128,13 @@ export class PythonTargetLanguage extends TargetLanguage<
 
     public get supportsOptionalClassProperties(): boolean {
         return false;
+    }
+
+    // `Tuple[A, B]` (`tuple[A, B]` from 3.9).  Optional items would take a
+    // union of tuples, and a rest `tuple[A, *tuple[R, ...]]`, which needs
+    // Python 3.11.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
     }
 
     public needsTransformerForType(t: Type): boolean {

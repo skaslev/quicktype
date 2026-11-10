@@ -25,6 +25,7 @@ import {
     ClassType,
     EnumType,
     MapType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -119,9 +120,29 @@ export class PythonRenderer extends ConvenienceRenderer {
         return true;
     }
 
+    // Types that aren't declared yet are referred to by quoted name.
     protected canBeForwardDeclared(t: Type): boolean {
         const kind = t.kind;
-        return kind === "class" || kind === "enum";
+        return (
+            kind === "class" ||
+            kind === "enum" ||
+            (t instanceof TupleType && this.tupleNeedsName(t))
+        );
+    }
+
+    // Tuples are spelled out, `Tuple[A, B]`, unless the schema names them
+    // or they contain themselves, which takes a type alias.  Unions are
+    // always spelled out in Python.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "enum"].includes(c.kind) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
     }
 
     protected emitBlock(line: Sourcelike, f: () => void): void {
@@ -183,6 +204,16 @@ export class PythonRenderer extends ConvenienceRenderer {
         if (actualType instanceof UnionType) {
             return iterableSome(actualType.members, (m) =>
                 this.typeContainsForwardRef(m),
+            );
+        }
+
+        if (actualType instanceof TupleType) {
+            if (this.tupleNeedsName(actualType)) {
+                return !this.declaredTypes.has(actualType);
+            }
+
+            return actualType.items.some((item) =>
+                this.typeContainsForwardRef(item),
             );
         }
 
@@ -360,7 +391,31 @@ export class PythonRenderer extends ConvenienceRenderer {
                     `Transformed type ${transformedStringType.kind} not supported`,
                 );
             },
+            (tupleType) =>
+                this.tupleNeedsName(tupleType)
+                    ? this.namedType(tupleType, suppressQuotes)
+                    : this.tupleTypeSource(tupleType, suppressQuotes),
         );
+    }
+
+    // The tuple spelled out, `Tuple[A, B]`.
+    protected tupleTypeSource(
+        t: TupleType,
+        suppressQuotes = false,
+    ): Sourcelike {
+        return [
+            this.pyOptions.features.builtinGenerics
+                ? "tuple"
+                : this.withTyping("Tuple"),
+            "[",
+            arrayIntercalate(
+                ", ",
+                t.items.map((item) =>
+                    this.pythonType(item, false, suppressQuotes),
+                ),
+            ),
+            "]",
+        ];
     }
 
     protected declarationLine(t: Type): Sourcelike {
@@ -553,6 +608,34 @@ export class PythonRenderer extends ConvenienceRenderer {
         });
     }
 
+    // A type alias, `Pair = Tuple[str, float]`.  It may refer to itself,
+    // quoted: `Node = Tuple[str, List['Node']]`.  pydantic recurses forever
+    // into such an alias, so for pydantic it's a `TypeAliasType`, whose
+    // value is all quoted: `Node = TypeAliasType("Node", "Tuple[str,
+    // List[Node]]")`.  Output without type hints has no use for an alias.
+    protected emitTuple(t: TupleType, tupleName: Name): void {
+        if (this.pyOptions.features.typeHints) {
+            if (this.pyOptions.pydanticBaseModel) {
+                this.emitLine(
+                    tupleName,
+                    " = ",
+                    this.withImport("typing_extensions", "TypeAliasType"),
+                    '("',
+                    tupleName,
+                    '", "',
+                    this.tupleTypeSource(t, true),
+                    '")',
+                );
+            } else {
+                this.emitLine(tupleName, " = ", this.tupleTypeSource(t));
+            }
+
+            this.emitDescription(this.descriptionForType(t));
+        }
+
+        this.declaredTypes.add(t);
+    }
+
     protected emitImports(): void {
         this.moduleImports.forEach((module) => {
             this.emitLine("import ", module);
@@ -578,6 +661,7 @@ export class PythonRenderer extends ConvenienceRenderer {
                 (c: ClassType) => this.emitClass(c),
                 (e) => this.emitEnum(e),
                 (_u) => {},
+                (t, name) => this.emitTuple(t, name),
             );
         });
 

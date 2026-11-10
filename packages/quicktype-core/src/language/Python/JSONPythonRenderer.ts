@@ -28,29 +28,52 @@ import {
     UnionMemberMatchTransformer,
     transformationForType,
 } from "../../Transformers.js";
-import type { ClassType, Type, UnionType } from "../../Type/index.js";
+import {
+    type ClassType,
+    TupleType,
+    type Type,
+    type UnionType,
+} from "../../Type/index.js";
 import { matchType } from "../../Type/TypeUtils.js";
 
 import { PythonRenderer } from "./PythonRenderer.js";
 import { snakeNameStyle } from "./utils.js";
 
-export type ConverterFunction =
-    | "none"
-    | "bool"
-    | "int"
-    | "from-float"
-    | "to-float"
-    | "str"
-    | "to-enum"
-    | "list"
-    | "to-class"
-    | "dict"
-    | "union"
-    | "from-date"
-    | "from-time"
-    | "from-datetime"
-    | "from-stringified-bool"
-    | "is-type";
+const converterFunctions = [
+    "none",
+    "bool",
+    "int",
+    "from-float",
+    "to-float",
+    "str",
+    "to-enum",
+    "list",
+    "to-class",
+    "dict",
+    "union",
+    "from-date",
+    "from-time",
+    "from-datetime",
+    "from-stringified-bool",
+    "is-type",
+    "from-tuple",
+    "to-tuple",
+] as const;
+
+export type ConverterFunction = (typeof converterFunctions)[number];
+
+// The name of the Python converter function `cf`.
+function converterFunctionName(cf: ConverterFunction): string {
+    const name = cf.replace(/-/g, "_");
+    if (cf.startsWith("from-") || cf.startsWith("to-") || cf.startsWith("is-"))
+        return name;
+    return `from_${name}`;
+}
+
+interface TupleConverterNames {
+    fromJSON: Name;
+    toJSON: Name;
+}
 
 // Python's keywords (`keyword.kwlist`).
 const keywords = new Set([
@@ -235,11 +258,25 @@ export class JSONPythonRenderer extends PythonRenderer {
         TopLevelConverterNames
     >();
 
+    private readonly _tupleConverterNames = new Map<
+        TupleType,
+        TupleConverterNames
+    >();
+
     private _haveTypeVar = false;
 
     private _haveEnumTypeVar = false;
 
     private _haveDateutil = false;
+
+    // The converters of named tuples, `from_pair`, mustn't take the names
+    // of the helper functions.
+    protected forbiddenNamesForGlobalNamespace(): readonly string[] {
+        return [
+            ...super.forbiddenNamesForGlobalNamespace(),
+            ...converterFunctions.map(converterFunctionName),
+        ];
+    }
 
     protected forbiddenForObjectProperties(c: ClassType, className: Name) {
         const result = super.forbiddenForObjectProperties(c, className);
@@ -653,6 +690,79 @@ export class JSONPythonRenderer extends PythonRenderer {
         );
     }
 
+    // A JSON array with an element of the right type in each position.
+    protected emitFromTupleConverter(): void {
+        this.emitBlock(
+            [
+                "def from_tuple(fs",
+                this.typeHint(": ", this.converterListType()),
+                ", ",
+                this.typingDecl("x", "Any"),
+                ")",
+                this.typeHint(
+                    " -> ",
+                    this.pyOptions.features.builtinGenerics
+                        ? "tuple"
+                        : this.withTyping("Tuple"),
+                    "[",
+                    this.withTyping("Any"),
+                    ", ...]",
+                ),
+                ":",
+            ],
+            () => {
+                this.emitLine(
+                    "assert isinstance(x, list) and len(x) == len(fs)",
+                );
+                this.emitLine("return tuple(f(y) for (f, y) in zip(fs, x))");
+            },
+        );
+    }
+
+    protected emitToTupleConverter(): void {
+        this.emitBlock(
+            [
+                "def to_tuple(fs",
+                this.typeHint(": ", this.converterListType()),
+                ", ",
+                this.typingDecl("x", "Any"),
+                ")",
+                this.typeHint(
+                    " -> ",
+                    this.pyOptions.features.builtinGenerics
+                        ? "list"
+                        : this.withTyping("List"),
+                    "[",
+                    this.withTyping("Any"),
+                    "]",
+                ),
+                ":",
+            ],
+            () => {
+                this.emitLine(
+                    "assert isinstance(x, tuple) and len(x) == len(fs)",
+                );
+                this.emitLine("return [f(y) for (f, y) in zip(fs, x)]");
+            },
+        );
+    }
+
+    // `List[Callable[[Any], Any]]`, a converter per tuple item.
+    private converterListType(): Sourcelike {
+        return [
+            this.pyOptions.features.builtinGenerics
+                ? "list"
+                : this.withTyping("List"),
+            "[",
+            this.withTyping("Callable"),
+            "[[",
+            this.withTyping("Any"),
+            "], ",
+            this.withTyping("Any"),
+            "]]",
+        ];
+    }
+
     protected emitConverter(cf: ConverterFunction): void {
         switch (cf) {
             case "none": {
@@ -735,6 +845,16 @@ export class JSONPythonRenderer extends PythonRenderer {
                 return;
             }
 
+            case "from-tuple": {
+                this.emitFromTupleConverter();
+                return;
+            }
+
+            case "to-tuple": {
+                this.emitToTupleConverter();
+                return;
+            }
+
             default:
                 assertNever(cf);
         }
@@ -743,14 +863,7 @@ export class JSONPythonRenderer extends PythonRenderer {
     // Return the name of the Python converter function `cf`.
     protected conv(cf: ConverterFunction): Sourcelike {
         this._deserializerFunctions.add(cf);
-        const name = cf.replace(/-/g, "_");
-        if (
-            cf.startsWith("from-") ||
-            cf.startsWith("to-") ||
-            cf.startsWith("is-")
-        )
-            return name;
-        return ["from_", name];
+        return converterFunctionName(cf);
     }
 
     // Applies the converter function to `arg`
@@ -796,6 +909,7 @@ export class JSONPythonRenderer extends PythonRenderer {
 
                 return undefined;
             },
+            (_tupleType) => "tuple",
         );
         if (s === undefined) {
             return panic(`No type object for ${t.kind}`);
@@ -1057,7 +1171,50 @@ export class JSONPythonRenderer extends PythonRenderer {
                     `Transformed type ${transformedStringType.kind} not supported`,
                 );
             },
+            (tupleType) => {
+                const names = this._tupleConverterNames.get(tupleType);
+                if (names !== undefined) {
+                    return compose(value, {
+                        lambda: singleWord(names.fromJSON),
+                        value: undefined,
+                    });
+                }
+
+                return this.tupleDeserializer(value, tupleType);
+            },
         );
+    }
+
+    // `from_tuple([from_str, from_float], x)`
+    private tupleDeserializer(
+        value: ValueOrLambda,
+        t: TupleType,
+    ): ValueOrLambda {
+        const deserializers = t.items.map(
+            (item) => makeLambda(this.deserializer(identity, item)).source,
+        );
+        return compose(value, (v) => [
+            this.conv("from-tuple"),
+            "([",
+            arrayIntercalate(", ", deserializers),
+            "], ",
+            v,
+            ")",
+        ]);
+    }
+
+    private tupleSerializer(value: ValueOrLambda, t: TupleType): ValueOrLambda {
+        const serializers = t.items.map(
+            (item) => makeLambda(this.serializer(identity, item)).source,
+        );
+        return compose(value, (v) => [
+            this.conv("to-tuple"),
+            "([",
+            arrayIntercalate(", ", serializers),
+            "], ",
+            v,
+            ")",
+        ]);
     }
 
     protected serializer(value: ValueOrLambda, t: Type): ValueOrLambda {
@@ -1147,7 +1304,79 @@ export class JSONPythonRenderer extends PythonRenderer {
                     `Transformed type ${transformedStringType.kind} not supported`,
                 );
             },
+            (tupleType) => {
+                const names = this._tupleConverterNames.get(tupleType);
+                if (names !== undefined) {
+                    return compose(value, {
+                        lambda: singleWord(names.toJSON),
+                        value: undefined,
+                    });
+                }
+
+                return this.tupleSerializer(value, tupleType);
+            },
         );
+    }
+
+    // A named tuple, which may contain itself, is converted by functions of
+    // its own: `from_pair` and `to_pair`.
+    protected emitTuple(t: TupleType, tupleName: Name): void {
+        super.emitTuple(t, tupleName);
+        const { fromJSON, toJSON } = defined(this._tupleConverterNames.get(t));
+        const pythonType = this.namedType(t);
+        this.ensureBlankLine(2);
+        this.emitBlock(
+            [
+                "def ",
+                fromJSON,
+                "(",
+                this.typingDecl("x", "Any"),
+                ")",
+                this.typeHint(" -> ", pythonType),
+                ":",
+            ],
+            () =>
+                this.emitLine(
+                    "return ",
+                    makeValue(this.tupleDeserializer({ value: "x" }, t)),
+                ),
+        );
+        this.ensureBlankLine(2);
+        this.emitBlock(
+            [
+                "def ",
+                toJSON,
+                "(x",
+                this.typeHint(": ", pythonType),
+                ")",
+                this.typingReturn("Any"),
+                ":",
+            ],
+            () =>
+                this.emitLine(
+                    "return ",
+                    makeValue(this.tupleSerializer({ value: "x" }, t)),
+                ),
+        );
+    }
+
+    protected makeNamedTypeDependencyNames(
+        t: Type,
+        name: Name,
+    ): DependencyName[] {
+        if (!(t instanceof TupleType)) return [];
+        const fromJSON = new DependencyName(
+            this._converterNamer,
+            name.order,
+            (l) => `from_${l(name)}`,
+        );
+        const toJSON = new DependencyName(
+            this._converterNamer,
+            name.order,
+            (l) => `to_${l(name)}`,
+        );
+        this._tupleConverterNames.set(t, { fromJSON, toJSON });
+        return [fromJSON, toJSON];
     }
 
     protected emitClassMembers(t: ClassType): void {

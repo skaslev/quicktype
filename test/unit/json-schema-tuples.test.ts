@@ -41,7 +41,6 @@ describe("targets without tuples", () => {
     // through arrays and unions only, which these renderers can't declare.
     test.each([
         ["cplusplus", "std::vector<nlohmann::json>"],
-        ["python", "list[Any]"],
         ["java", "List<Object>"],
     ] as const)("%s: a tuple's reference to itself becomes any", async (lang, expected) => {
         const output = await renderSchema(lang, {
