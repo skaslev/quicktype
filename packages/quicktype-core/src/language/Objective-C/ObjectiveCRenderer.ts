@@ -580,8 +580,12 @@ export class ObjectiveCRenderer extends ConvenienceRenderer {
     }
 
     private emitNonClassTopLevelTypedef(t: Type, name: Name): void {
+        // A nullable top-level (`T | null`) is a typedef of T; nullability is
+        // a property of the pointer, not the type.
         const nonPointerTypeName =
-            t instanceof UnionType ? "NSObject" : this.objcType(t, true)[0];
+            t instanceof UnionType && nullableFromUnion(t) === null
+                ? "NSObject"
+                : this.objcType(t, true)[0];
         this.emitLine("typedef ", nonPointerTypeName, " ", name, ";");
     }
 
