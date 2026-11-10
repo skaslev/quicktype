@@ -320,3 +320,81 @@ describe("named tuples", () => {
         expect(output.match(/^def from_str\(/gm)).toHaveLength(1);
     });
 });
+
+// Python transforms `"format": "integer"` strings, and so the unions they're
+// in.  The array-like members of such a union are tried in turn.
+describe("unions with transformed members", () => {
+    const integerString = { type: "string", format: "integer" };
+    const withV = (anyOf: object[]): object => ({
+        type: "object",
+        properties: { v: { anyOf } },
+        required: ["v"],
+    });
+
+    test("keep a tuple", async () => {
+        const output = await renderSchema(
+            withV([
+                integerString,
+                {
+                    type: "array",
+                    items: [{ type: "string" }, { type: "number" }],
+                },
+            ]),
+        );
+        expect(output).toContain("    v: tuple[str, float] | int");
+        expect(output).toContain(
+            'v = from_union([lambda x: int(from_str(x)), lambda x: from_tuple([from_str, from_float], x)], obj["v"])',
+        );
+        expect(output).toContain(
+            'result["v"] = from_union([lambda x: from_str((lambda x: str((lambda x: is_type(int, x))(x)))(x)), lambda x: to_tuple([from_str, to_float], (lambda x: is_type(tuple, x))(x))], self.v)',
+        );
+    });
+
+    test("keep tuples of different shapes", async () => {
+        const output = await renderSchema(
+            withV([
+                integerString,
+                {
+                    type: "array",
+                    items: [{ type: "string" }, { type: "number" }],
+                },
+                { type: "array", items: [{ type: "boolean" }] },
+            ]),
+        );
+        expect(output).toContain(
+            "    v: tuple[str, float] | tuple[bool] | int",
+        );
+        expect(output).toContain(
+            "lambda x: from_union([lambda x: from_tuple([from_str, from_float], x), lambda x: from_tuple([from_bool], x)], x)",
+        );
+        expect(output).toContain(
+            "lambda x: to_tuple([from_str, to_float], (lambda x: is_type(tuple, x))(x))",
+        );
+        expect(output).toContain(
+            "lambda x: to_tuple([from_bool], (lambda x: is_type(tuple, x))(x))",
+        );
+    });
+
+    test("try a tuple before the array", async () => {
+        const output = await renderSchema(
+            withV([
+                integerString,
+                { type: "array", items: { type: "string" } },
+                {
+                    type: "array",
+                    items: [{ type: "string" }, { type: "integer" }],
+                },
+            ]),
+        );
+        expect(output).toContain("    v: list[str] | tuple[str, int] | int");
+        expect(output).toContain(
+            "lambda x: from_union([lambda x: from_tuple([from_str, from_int], x), lambda x: from_list(from_str, x)], x)",
+        );
+        expect(output).toContain(
+            "lambda x: to_tuple([from_str, from_int], (lambda x: is_type(tuple, x))(x))",
+        );
+        expect(output).toContain(
+            "lambda x: from_list(from_str, (lambda x: is_type(list, x))(x))",
+        );
+    });
+});

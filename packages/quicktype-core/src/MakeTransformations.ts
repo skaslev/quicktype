@@ -2,7 +2,7 @@ import {
     arraySortByInto,
     iterableFirst,
     iterableSome,
-    mapMapEntries,
+    mapMap,
     setFilter,
     withDefault,
 } from "collection-utils";
@@ -41,6 +41,7 @@ import {
     EnumType,
     type PrimitiveStringTypeKind,
     type PrimitiveType,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -137,11 +138,12 @@ function replaceUnion(
         return builder.reconstituteType(t);
     }
 
-    const reconstitutedMembersByKind = mapMapEntries(
-        union.members.entries(),
-        (m) => [m.kind, reconstituteMember(m)],
+    // Keyed by member, not by kind: tuples of different shapes are
+    // different members of the same kind.
+    const reconstitutedMembers = mapMap(union.members.entries(), (m) =>
+        reconstituteMember(m),
     );
-    const reconstitutedMemberSet = new Set(reconstitutedMembersByKind.values());
+    const reconstitutedMemberSet = new Set(reconstitutedMembers.values());
     const haveUnion = reconstitutedMemberSet.size > 1;
 
     if (!haveUnion) {
@@ -152,8 +154,8 @@ function replaceUnion(
         ? builder.getUnionType(union.getAttributes(), reconstitutedMemberSet)
         : defined(iterableFirst(reconstitutedMemberSet));
 
-    function memberForKind(kind: TypeKind): number {
-        return defined(reconstitutedMembersByKind.get(kind));
+    function reconstitutedMember(member: Type): TypeRef {
+        return defined(reconstitutedMembers.get(member));
     }
 
     function consumer(memberTypeRef: TypeRef): Transformer | undefined {
@@ -161,17 +163,22 @@ function replaceUnion(
         return new UnionInstantiationTransformer(graph, memberTypeRef);
     }
 
-    function transformerForKind(
-        kind: TypeKind,
-    ): DecodingTransformer | undefined {
-        const member = union.findMember(kind);
-        if (member === undefined) return undefined;
-        const memberTypeRef = memberForKind(kind);
+    function transformerForMember(member: Type): DecodingTransformer {
+        const memberTypeRef = reconstitutedMember(member);
         return new DecodingTransformer(
             graph,
             memberTypeRef,
             consumer(memberTypeRef),
         );
+    }
+
+    // For the kinds a union has at most one member of.
+    function transformerForKind(
+        kind: TypeKind,
+    ): DecodingTransformer | undefined {
+        const member = union.findMember(kind);
+        if (member === undefined) return undefined;
+        return transformerForMember(member);
     }
 
     let maybeStringType: TypeRef | undefined;
@@ -187,7 +194,7 @@ function replaceUnion(
     }
 
     function transformerForStringType(t: Type): Transformer | undefined {
-        const memberRef = memberForKind(t.kind);
+        const memberRef = reconstitutedMember(t);
         if (t.kind === "string") {
             const minMax = minMaxLengthForType(t);
             if (minMax === undefined) {
@@ -245,6 +252,31 @@ function replaceUnion(
         );
     }
 
+    // A JSON array is the array member or one of the tuples.  With several
+    // of them, they're tried in turn, those that take fewer lengths first:
+    // fixed-length tuples, tuples with optional items, tuples with a rest,
+    // and the array last.
+    const arrayMembers = arraySortByInto(
+        Array.from(union.members).filter(
+            (m) => m instanceof ArrayType || m instanceof TupleType,
+        ),
+        (m) => {
+            if (!(m instanceof TupleType)) return Number.POSITIVE_INFINITY;
+            if (m.rest !== undefined) return Number.MAX_SAFE_INTEGER;
+            return m.items.length - m.minItems;
+        },
+    );
+    let transformerForArray: Transformer | undefined;
+    if (arrayMembers.length === 1) {
+        transformerForArray = transformerForMember(arrayMembers[0]);
+    } else if (arrayMembers.length > 1) {
+        transformerForArray = new ChoiceTransformer(
+            graph,
+            builder.getPrimitiveType("any"),
+            arrayMembers.map(transformerForMember),
+        );
+    }
+
     const transformerForClass = transformerForKind("class");
     const transformerForMap = transformerForKind("map");
     assert(
@@ -261,7 +293,7 @@ function replaceUnion(
         transformerForKind("double"),
         transformerForKind("bool"),
         transformerForString,
-        transformerForKind("array"),
+        transformerForArray,
         transformerForObject,
     );
     const attributes = transformationAttributes(

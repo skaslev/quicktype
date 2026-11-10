@@ -15,6 +15,7 @@ import { assert, indentationString, panic } from "./support/Support.js";
 import {
     EnumType,
     PrimitiveType,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -169,8 +170,11 @@ export class DecodingTransformer extends ProducerTransformer {
         super("decode", graph, sourceTypeRef, consumer);
     }
 
+    // A JSON value of the right type decodes into the one member of a union
+    // for that type, except for tuples: a JSON array may have the wrong
+    // length, and then be the array or another tuple.
     public get canFail(): boolean {
-        return false;
+        return this.sourceType instanceof TupleType;
     }
 
     public reverse(
