@@ -28,6 +28,7 @@ import {
     type ClassProperty,
     type ClassType,
     type ObjectType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -52,26 +53,6 @@ export interface JavaScriptTypeAnnotations {
 }
 
 const identityNamingFunction = funPrefixNamer("properties", (s) => s);
-
-/**
- * Whether `t` contains itself through types for which `passesThrough`
- * holds.
- */
-function isInCycleThrough(
-    t: Type,
-    passesThrough: (t: Type) => boolean,
-): boolean {
-    const seen = new Set<Type>();
-    const work = Array.from(t.getNonAttributeChildren());
-    for (let c = work.pop(); c !== undefined; c = work.pop()) {
-        if (c === t) return true;
-        if (seen.has(c) || !passesThrough(c)) continue;
-        seen.add(c);
-        work.push(...c.getNonAttributeChildren());
-    }
-
-    return false;
-}
 
 export class JavaScriptRenderer extends ConvenienceRenderer {
     private readonly _recursiveUnions = new Map<UnionType, boolean>();
@@ -145,10 +126,14 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
 
     /**
      * Whether a cycle of types passes through `t` without referring to it
-     * by name.  The type map spells out everything but classes and enums.
+     * by name.  The type map spells out everything but classes, enums and
+     * named tuples.
      */
     protected cyclePassesThrough(t: Type): boolean {
-        return !["class", "object", "enum"].includes(t.kind);
+        return (
+            !["class", "object", "enum"].includes(t.kind) &&
+            !(t instanceof TupleType && this.tupleNeedsName(t))
+        );
     }
 
     /**
@@ -160,7 +145,9 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
     protected unionIsRecursive(u: UnionType): boolean {
         let recursive = this._recursiveUnions.get(u);
         if (recursive === undefined) {
-            recursive = isInCycleThrough(u, (t) => this.cyclePassesThrough(t));
+            recursive = this.isInCycleThrough(u, (t) =>
+                this.cyclePassesThrough(t),
+            );
             this._recursiveUnions.set(u, recursive);
         }
 
@@ -189,6 +176,7 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
     protected typeMapTypeFor(t: Type): Sourcelike {
         if (
             ["class", "object", "enum"].includes(t.kind) ||
+            (t instanceof TupleType && this.tupleNeedsName(t)) ||
             (t instanceof UnionType && this.unionIsRecursive(t))
         ) {
             return ['r("', this.nameForNamedType(t), '")'];
@@ -223,7 +211,22 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
 
                 return '""';
             },
+            (tupleType) => this.typeMapTypeForTuple(tupleType),
         );
+    }
+
+    private typeMapTypeForTuple(t: TupleType): Sourcelike {
+        const items = t.items.map((item) => this.typeMapTypeFor(item));
+        const rest =
+            t.rest === undefined ? "" : [", ", this.typeMapTypeFor(t.rest)];
+        return [
+            "tu([",
+            ...arrayIntercalate(", ", items),
+            "], ",
+            t.minItems.toString(),
+            rest,
+            ")",
+        ];
     }
 
     private typeMapTypeForUnion(u: UnionType): Sourcelike {
@@ -314,6 +317,17 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
                 });
                 this.emitLine("],");
             });
+            // Named tuples, which may be recursive, are referenced by name.
+            const ignore = (): void => undefined;
+            this.forEachNamedType("none", ignore, ignore, ignore, (t, name) =>
+                this.emitLine(
+                    '"',
+                    name,
+                    '": ',
+                    this.typeMapTypeForTuple(t),
+                    ",",
+                ),
+            );
             this.forEachUnion("none", (u, name) => {
                 if (!this.unionIsRecursive(u)) return;
                 this.emitLine(
@@ -454,6 +468,9 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
             const hasArrayConstraints = Array.from(
                 this.typeGraph.allTypesUnordered(),
             ).some((t) => minMaxItemsForType(t) !== undefined);
+            const hasTuples = Array.from(
+                this.typeGraph.allTypesUnordered(),
+            ).some((t) => t instanceof TupleType);
             this.ensureBlankLine();
             this.emitMultiline(`function invalidValue(typ${anyAnnotation}, val${anyAnnotation}, key${anyAnnotation}, parent${anyAnnotation} = '')${neverAnnotation} {
     const prettyTyp = prettyTypeName(typ);
@@ -525,7 +542,18 @@ function transform(val${anyAnnotation}, typ${anyAnnotation}, getProps${anyAnnota
 ${hasArrayConstraints ? '        if ((typ.min !== undefined && val.length < typ.min) || (typ.max !== undefined && val.length > typ.max)) return invalidValue(l("array"), val, key, parent);' : ""}
         return val.map(el => transform(el, typ${hasArrayConstraints ? ".arrayItems" : ""}, getProps));
     }
-
+${
+    hasTuples
+        ? `
+    function transformTuple(typ${anyAnnotation}, val${anyAnnotation})${anyAnnotation} {
+        // val must be an array with an element of the right type in each position
+        const items = typ.tupleItems;
+        if (!Array.isArray(val) || val.length < typ.min || (typ.rest === undefined && val.length > items.length)) return invalidValue(l("array"), val, key, parent);
+        return val.map((el${anyAnnotation}, i${anyAnnotation}) => transform(el, i < items.length ? items[i] : typ.rest, getProps));
+    }
+`
+        : ""
+}
     function transformDate(val${anyAnnotation})${anyAnnotation} {
         if (val === null) {
             return null;
@@ -578,7 +606,7 @@ ${hasArrayConstraints ? '        if ((typ.min !== undefined && val.length < typ.
             : typ.hasOwnProperty("integer")      ? typeof val === "number" && val % 1 === 0 ? val : invalidValue(l("integer"), val, key, parent)
             : typ.hasOwnProperty("unionMembers") ? transformUnion(typ.unionMembers, val)
             : typ.hasOwnProperty("arrayItems")    ? transformArray(${hasArrayConstraints ? "typ" : "typ.arrayItems"}, val)
-            : typ.hasOwnProperty("props")         ? transformObject(getProps(typ), typ.additional, val)
+${hasTuples ? '            : typ.hasOwnProperty("tupleItems")    ? transformTuple(typ, val)\n' : ""}            : typ.hasOwnProperty("props")         ? transformObject(getProps(typ), typ.additional, val)
             : invalidValue(typ, val, key, parent);
     }
     // Numbers can be parsed by Date but shouldn't be.
@@ -618,7 +646,15 @@ function n(typ${anyAnnotation}, min${anyAnnotation}, max${anyAnnotation}) {
     return { number: typ, min, max };
 }
 
-function u(...typs${anyArrayAnnotation}) {
+${
+    hasTuples
+        ? `function tu(items${anyArrayAnnotation}, min${anyAnnotation}, rest${anyAnnotation} = undefined) {
+    return { tupleItems: items, min, rest };
+}
+
+`
+        : ""
+}function u(...typs${anyArrayAnnotation}) {
     return { unionMembers: typs };
 }
 

@@ -17,6 +17,7 @@ import {
     type ClassType,
     EnumType,
     ObjectType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -57,7 +58,53 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
             return this.inlinesUnion(type) ? undefined : type;
         }
 
+        if (type instanceof TupleType) {
+            return this.tupleNeedsName(type) ? type : undefined;
+        }
+
         return isNamedType(type) ? type : undefined;
+    }
+
+    // Tuples are spelled out, unless the schema names them or they contain
+    // themselves (TypeScript can only express that through a type alias).
+    // A declared union ends such a cycle in the type declarations, but not
+    // in the runtime checks' type map, which spells out every union.
+    protected tupleNeedsName(t: TupleType): boolean {
+        const declaredUnionsEndCycles = this._tsFlowOptions.justTypes;
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "object", "enum"].includes(c.kind) &&
+                    !(
+                        c instanceof UnionType &&
+                        declaredUnionsEndCycles &&
+                        this.declaresUnion(c)
+                    ) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
+    }
+
+    protected sourceForTupleType(t: TupleType): MultiWord {
+        const items = t.items.map((item, i) => {
+            const source = this.sourceFor(item);
+            return i < t.minItems
+                ? source.source
+                : [parenIfNeeded(source), "?"];
+        });
+        if (t.rest !== undefined) {
+            items.push(["...", parenIfNeeded(this.sourceFor(t.rest)), "[]"]);
+        }
+
+        const source: Sourcelike[] = ["["];
+        items.forEach((item, i) => {
+            if (i > 0) source.push(", ");
+            source.push(item);
+        });
+        source.push("]");
+        return singleWord(source);
     }
 
     protected get emptyObjectType(): string | undefined {
@@ -192,6 +239,10 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
 
                 return singleWord("string");
             },
+            (tupleType) =>
+                this.tupleNeedsName(tupleType)
+                    ? singleWord(this.nameForNamedType(tupleType))
+                    : this.sourceForTupleType(tupleType),
         );
     }
 
@@ -296,6 +347,17 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
         this.emitClassBlock(c, className);
     }
 
+    protected emitTuple(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        this.emitLine(
+            "export type ",
+            tupleName,
+            " = ",
+            this.sourceForTupleType(t).source,
+            ";",
+        );
+    }
+
     protected emitUnion(u: UnionType, unionName: Name): void {
         if (this.inlinesUnion(u)) {
             return;
@@ -334,6 +396,7 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
             (c: ClassType, n: Name) => this.emitClass(c, n),
             (e, n) => this.emitEnum(e, n),
             (u, n) => this.emitUnion(u, n),
+            (t, n) => this.emitTuple(t, n),
         );
     }
 

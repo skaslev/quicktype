@@ -5,6 +5,7 @@ import {
     type IntegerRange,
 } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type {
     PrimitiveStringTypeKind,
@@ -89,6 +90,10 @@ export class TypeScriptTargetLanguage extends TargetLanguage<
 
     public get supportsFullObjectType(): boolean {
         return true;
+    }
+
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "typescript">(
