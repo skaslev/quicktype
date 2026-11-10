@@ -36,6 +36,8 @@ import {
 export class GoRenderer extends ConvenienceRenderer {
     private readonly _topLevelUnmarshalNames = new Map<Name, Name>();
 
+    private readonly _topLevelMarshalNames = new Map<Name, Name>();
+
     private _currentFilename: string | undefined;
 
     private _namedTopLevelNames: ReadonlySet<Name> | undefined;
@@ -116,7 +118,15 @@ export class GoRenderer extends ConvenienceRenderer {
             (lookup) => `unmarshal_${lookup(topLevelName)}`,
         );
         this._topLevelUnmarshalNames.set(topLevelName, unmarshalName);
-        return [unmarshalName];
+        // Only used when the top-level is a named pointer type (nullable
+        // top-level), which Go doesn't allow as a method receiver.
+        const marshalName = new DependencyName(
+            namingFunction,
+            topLevelName.order,
+            (lookup) => `marshal_${lookup(topLevelName)}`,
+        );
+        this._topLevelMarshalNames.set(topLevelName, marshalName);
+        return [unmarshalName, marshalName];
     }
 
     /// startFile takes a file name, lowercases it, appends ".go" to it, and sets it as the current filename.
@@ -280,13 +290,16 @@ export class GoRenderer extends ConvenienceRenderer {
         const imports =
             t instanceof ClassType
                 ? this.collectClassImports(t)
-                : t instanceof UnionType
+                : t instanceof UnionType && this.unionNeedsName(t)
                   ? this.collectUnionImports(t)
-                  : undefined;
+                  : this.collectAliasImports(t);
         this.emitPackageDefinitons(true, imports);
 
+        let isPointerAlias = false;
         if (this.namedTypeToNameForTopLevel(t) === undefined) {
-            this.emitLine("type ", name, " ", this.goType(t));
+            const goType = this.goType(t);
+            isPointerAlias = this.sourcelikeToString(goType).startsWith("*");
+            this.emitLine("type ", name, " ", goType);
         }
 
         if (this._options.justTypes || this._options.justTypesAndPackage) {
@@ -294,7 +307,7 @@ export class GoRenderer extends ConvenienceRenderer {
             return;
         }
 
-        this.emitTopLevelFunctions(name);
+        this.emitTopLevelFunctions(name, isPointerAlias);
         this.endFile();
     }
 
@@ -323,7 +336,9 @@ export class GoRenderer extends ConvenienceRenderer {
         this.emitLineOnce("//    bytes, err = ", ref, ".Marshal()");
     }
 
-    private emitTopLevelFunctions(name: Name): void {
+    // A pointer alias (a nullable top-level) can't be a method receiver, so
+    // it gets a function `MarshalName` instead of the `Marshal` method.
+    private emitTopLevelFunctions(name: Name, isPointerAlias = false): void {
         const unmarshalName = defined(this._topLevelUnmarshalNames.get(name));
         this.ensureBlankLine();
         this.emitFunc(
@@ -335,9 +350,23 @@ export class GoRenderer extends ConvenienceRenderer {
             },
         );
         this.ensureBlankLine();
-        this.emitFunc(["(r *", name, ") Marshal() ([]byte, error)"], () => {
-            this.emitLine("return json.Marshal(r)");
-        });
+        if (isPointerAlias) {
+            this.emitFunc(
+                [
+                    defined(this._topLevelMarshalNames.get(name)),
+                    "(r ",
+                    name,
+                    ") ([]byte, error)",
+                ],
+                () => {
+                    this.emitLine("return json.Marshal(r)");
+                },
+            );
+        } else {
+            this.emitFunc(["(r *", name, ") Marshal() ([]byte, error)"], () => {
+                this.emitLine("return json.Marshal(r)");
+            });
+        }
     }
 
     private emitClass(c: ClassType, className: Name): void {
@@ -402,7 +431,11 @@ export class GoRenderer extends ConvenienceRenderer {
         this.indent(() => this.emitTable(columns));
         this.emitLine(")");
         const type = this.sourcelikeToString(enumName);
-        if (inUnion) {
+        if (
+            this._options.justTypes ||
+            this._options.justTypesAndPackage ||
+            inUnion
+        ) {
             this.endFile();
             return;
         }
@@ -814,6 +847,17 @@ func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, 
             goTypes.push(this.propertyGoType(p));
         });
         return this.collectGoTypeImports(goTypes);
+    }
+
+    // Imports for a top-level emitted as `type Name <goType>`, e.g. a
+    // nullable (`*T`), array or map top-level.
+    private collectAliasImports(t: Type): Set<string> {
+        const imports = new Set<string>();
+        if (this.sourcelikeToString(this.goType(t)).includes("time.Time")) {
+            imports.add("time");
+        }
+
+        return imports;
     }
 
     private collectUnionImports(u: UnionType): Set<string> {
