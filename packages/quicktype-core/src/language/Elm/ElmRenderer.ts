@@ -906,6 +906,28 @@ import Dict exposing (Dict)`);
             if (!this._options.useList) {
                 this.emitLine("import Array exposing (Array)");
             }
+        } else {
+            // Just types: a module of type aliases and custom types only.
+            this.ensureBlankLine();
+            this.emitLine(
+                "module ",
+                this._options.moduleName,
+                " exposing (..)",
+            );
+            this.ensureBlankLine();
+            this.emitLine("import Dict exposing (Dict)");
+            if (!this._options.useList) {
+                this.emitLine("import Array exposing (Array)");
+            }
+
+            // Free-form values are Json.Decode.Value (Jdec.Value).
+            if (
+                Array.from(this.typeGraph.allTypesUnordered()).some(
+                    (t) => t.kind === "any",
+                )
+            ) {
+                this.emitLine("import Json.Decode as Jdec");
+            }
         }
 
         this.forEachTopLevel(
