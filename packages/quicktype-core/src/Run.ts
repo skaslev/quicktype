@@ -245,7 +245,9 @@ class Run implements RunContext {
             0,
             this._options.checkProvenance,
         );
-        typeBuilder.tupleSupport = targetLanguage.tupleSupport;
+        typeBuilder.tupleSupport = targetLanguage.getTupleSupport(
+            this._options.rendererOptions,
+        );
         typeBuilder.supportsRecursiveUnions =
             targetLanguage.supportsRecursiveUnions;
         typeBuilder.makesDistinctObjects =

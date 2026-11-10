@@ -136,6 +136,17 @@ export abstract class TargetLanguage<
     }
 
     /**
+     * `tupleSupport` for the given renderer options, the same untyped
+     * option values that `makeRenderer` receives.  Languages where it
+     * depends on an option override this.
+     */
+    public getTupleSupport(
+        _rendererOptions: Record<string, unknown> = {},
+    ): TupleSupport {
+        return this.tupleSupport;
+    }
+
+    /**
      * Whether the renderer can declare a union that contains itself through
      * arrays and unions only, with no class in between, e.g. a union of a
      * string and an array of the union.  A tuple the target can't express
