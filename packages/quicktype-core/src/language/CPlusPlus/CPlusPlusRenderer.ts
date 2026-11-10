@@ -49,6 +49,7 @@ import {
     type ClassProperty,
     ClassType,
     EnumType,
+    isPrimitiveStringTypeKind,
     MapType,
     type Type,
     UnionType,
@@ -608,10 +609,15 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitLine("#pragma once");
         this.ensureBlankLine();
 
+        const justTypesIncludes = this._options.justTypes
+            ? this.justTypesIncludes()
+            : undefined;
+
         // With getters and setters, emitExtraIncludes includes the optional
         // header anyway.
         if (
             this.haveOptionalProperties ||
+            justTypesIncludes?.optional === true ||
             (!this._options.codeFormat &&
                 iterableSome(this.namedUnions, (u) =>
                     this.recursiveUnionUsesStackOptional(u),
@@ -635,16 +641,26 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             }
         }
 
-        if (!this._options.justTypes) {
+        if (justTypesIncludes !== undefined) {
+            for (const header of justTypesIncludes.headers) {
+                this.emitInclude(true, header);
+            }
+        }
+
+        if (!this._options.justTypes || justTypesIncludes?.json === true) {
             if (!this._options.includeLocation) {
                 this.emitInclude(true, "nlohmann/json.hpp");
             } else {
                 this.emitInclude(false, "json.hpp");
             }
+        }
 
-            if (includeHelper && !this._options.typeSourceStyle) {
-                this.emitInclude(false, "helper.hpp");
-            }
+        if (
+            !this._options.justTypes &&
+            includeHelper &&
+            !this._options.typeSourceStyle
+        ) {
+            this.emitInclude(false, "helper.hpp");
         }
 
         this.ensureBlankLine();
@@ -664,6 +680,56 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         }
 
         return !this._options.boost && this.isOptionalAsValuePossible(t);
+    }
+
+    // In full mode nlohmann/json.hpp brings in the standard headers the
+    // generated types use.  Just-types output doesn't include it, so work out
+    // which headers the types need.
+    private justTypesIncludes(): {
+        headers: string[];
+        json: boolean;
+        optional: boolean;
+    } {
+        const kinds = new Set<string>();
+        let json = false;
+        let optional = false;
+        let sharedPtr = false;
+        for (const t of this.typeGraph.allTypesUnordered()) {
+            kinds.add(t.kind);
+            if (t.kind === "any") json = true;
+            // Forward-declared types and the types that break a cycle are
+            // held in std::shared_ptr where they're optional.
+            if (this.isForwardDeclaredType(t) || this.isCycleBreakerType(t)) {
+                sharedPtr = true;
+            }
+            if (t instanceof UnionType) {
+                // Unions with null become (boost|std)::optional<...>.
+                if (removeNullFromUnion(t)[0] !== null) optional = true;
+            } else if (
+                iterableSome(t.getChildren(), (child) => child.kind === "null")
+            ) {
+                // Outside of a union, null is rendered as nlohmann::json.
+                json = true;
+            }
+        }
+
+        for (const t of this.topLevels.values()) {
+            if (t.kind === "null") json = true;
+        }
+
+        const headers: string[] = [];
+        if (kinds.has("integer")) headers.push("cstdint");
+        if (kinds.has("map")) headers.push("map");
+        if (sharedPtr) headers.push("memory");
+        if (
+            kinds.has("map") ||
+            iterableSome(kinds, isPrimitiveStringTypeKind)
+        ) {
+            headers.push("string");
+        }
+
+        if (kinds.has("array")) headers.push("vector");
+        return { headers, json, optional };
     }
 
     protected finishFile(): void {
@@ -3258,7 +3324,6 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.forEachDeclaration("interposing", (decl) =>
             this.emitDeclaration(decl),
         );
-        if (this._options.justTypes) return;
         this.forEachTopLevel(
             "leading",
             (t: Type, name: Name) => this.emitTopLevelTypedef(t, name),
@@ -3334,23 +3399,9 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     }
 
     protected emitGenerators(): void {
-        if (this._options.justTypes) {
-            let didEmit = false;
-            const gathered = this.gatherSource(() =>
-                this.emitNamespaces(this._namespaceNames, () => {
-                    didEmit = this.forEachTopLevel(
-                        "none",
-                        (t: Type, name: Name) =>
-                            this.emitTopLevelTypedef(t, name),
-                        (t) => this.namedTypeToNameForTopLevel(t) === undefined,
-                    );
-                }),
-            );
-            if (didEmit) {
-                this.emitGatheredSource(gathered);
-                this.ensureBlankLine();
-            }
-        } else {
+        // In just-types mode there are no generators; top-level typedefs are
+        // emitted by emitTypes, inside the namespace with the other types.
+        if (!this._options.justTypes) {
             const userNamespaceForwardDecls =
                 this.gatherUserNamespaceForwardDecls();
             const nlohmannNamespaceForwardDecls =
@@ -3398,16 +3449,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
         this.emitExtraIncludes();
 
-        if (this._options.justTypes) {
-            this.emitTypes();
-        } else {
-            if (this.haveOptionals) {
-                this.emitOptionalHelpers();
-                this.ensureBlankLine();
-            }
-
-            this.emitNamespaces(this._namespaceNames, () => this.emitTypes());
+        if (!this._options.justTypes && this.haveOptionals) {
+            this.emitOptionalHelpers();
+            this.ensureBlankLine();
         }
+
+        this.emitNamespaces(this._namespaceNames, () => this.emitTypes());
 
         this.ensureBlankLine();
 
