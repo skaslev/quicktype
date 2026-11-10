@@ -28,7 +28,7 @@ import {
     removeNullFromUnion,
 } from "../../Type/TypeUtils.js";
 
-import { keywords } from "./constants.js";
+import { keywords, preludeTypeNames } from "./constants.js";
 import { IntegerType, type rustOptions } from "./language.js";
 import {
     Density,
@@ -69,7 +69,7 @@ export class RustRenderer extends ConvenienceRenderer {
     }
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
-        return keywords;
+        return [...keywords, ...preludeTypeNames];
     }
 
     protected forbiddenForObjectProperties(
@@ -83,14 +83,14 @@ export class RustRenderer extends ConvenienceRenderer {
         _u: UnionType,
         _unionName: Name,
     ): ForbiddenWordsInfo {
-        return { names: [], includeGlobalForbidden: true };
+        return { names: [...keywords], includeGlobalForbidden: false };
     }
 
     protected forbiddenForEnumCases(
         _e: EnumType,
         _enumName: Name,
     ): ForbiddenWordsInfo {
-        return { names: [], includeGlobalForbidden: true };
+        return { names: [...keywords], includeGlobalForbidden: false };
     }
 
     protected get commentLineStart(): string {

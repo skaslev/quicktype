@@ -73,10 +73,13 @@ export const keywords = [
 
     // Conflict between `std::Option` and potentially generated Option
     "option",
+] as const;
 
-    // Prelude and standard-library names that generated code refers to
-    // unqualified; a generated type with one of these names would shadow
-    // them and break compilation (e.g. a struct named `Option`).
+// Prelude and standard-library names that generated code refers to
+// unqualified; a generated type with one of these names would shadow
+// them and break compilation (e.g. a struct named `Option`).  Enum
+// variants are scoped to their enum, so they may use these names.
+export const preludeTypeNames = [
     "Option",
     "Some",
     "None",
