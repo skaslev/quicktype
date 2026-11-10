@@ -40,11 +40,12 @@ export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
 
     // An array with `minItems` >= 1 becomes a tuple that spells out the
     // guaranteed elements, followed by a rest element: `minItems: 2`
-    // renders as `[T, T, ...T[]]`.  Only `minItems` shapes the type;
-    // `maxItems` is enforced by none of the generated code, and spelling
-    // it out would enumerate every allowed arity as its own tuple.
+    // renders as `[T, T, ...T[]]`.  Otherwise only `minItems` shapes the
+    // type: spelling out `maxItems` would enumerate every allowed arity as
+    // its own tuple.  The exception is an exact length (`minItems` equal
+    // to `maxItems`), which renders as `[T, T]`.
     protected sourceForArrayType(arrayType: ArrayType): MultiWord {
-        const minItems = minMaxItemsForType(arrayType)?.[0];
+        const [minItems, maxItems] = minMaxItemsForType(arrayType) ?? [];
         if (
             minItems === undefined ||
             minItems < 1 ||
@@ -56,10 +57,15 @@ export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
         const itemType = this.sourceFor(arrayType.items);
         const source: Sourcelike[] = ["["];
         for (let i = 0; i < minItems; i++) {
-            source.push(itemType.source, ", ");
+            if (i > 0) source.push(", ");
+            source.push(itemType.source);
         }
 
-        source.push("...", parenIfNeeded(itemType), "[]]");
+        if (maxItems !== minItems) {
+            source.push(", ...", parenIfNeeded(itemType), "[]");
+        }
+
+        source.push("]");
         return singleWord(source);
     }
 
