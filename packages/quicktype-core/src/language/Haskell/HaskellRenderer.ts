@@ -541,6 +541,32 @@ import Data.Text (Text)`);
             } else {
                 this.emitLine("import Data.Vector (Vector)");
             }
+        } else {
+            // Just types: the module and the imports its types use.
+            this.ensureBlankLine();
+            this.emitLine("module ", this._options.moduleName);
+            this.indent(() => {
+                for (let i = 0; i < exports.length; i++) {
+                    this.emitLine(i === 0 ? "(" : ",", " ", exports[i]);
+                }
+
+                this.emitLine(exports.length === 0 ? "(" : "", ") where");
+            });
+            this.ensureBlankLine();
+            // Free-form values are Aeson's Value.
+            if (
+                Array.from(this.typeGraph.allTypesUnordered()).some(
+                    (t) => t.kind === "any",
+                )
+            ) {
+                this.emitLine("import Data.Aeson (Value)");
+            }
+
+            this.emitLine("import Data.HashMap.Strict (HashMap)");
+            this.emitLine("import Data.Text (Text)");
+            if (!this._options.useList) {
+                this.emitLine("import Data.Vector (Vector)");
+            }
         }
 
         this.forEachTopLevel(
@@ -559,6 +585,9 @@ import Data.Text (Text)`);
             (u: UnionType, unionName: Name) =>
                 this.emitUnionDefinition(u, unionName),
         );
+
+        // decodeTopLevel and the JSON instances need Aeson.
+        if (this._options.justTypes) return;
 
         this.forEachTopLevel(
             "leading-and-interposing",
