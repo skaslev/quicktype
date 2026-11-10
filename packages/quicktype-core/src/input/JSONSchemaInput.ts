@@ -827,6 +827,7 @@ async function addTypesInSchema(
         additionalProperties: unknown,
         sortKey: (k: string) => number | string = (k: string): string =>
             k.toLowerCase(),
+        patternProperties: StringMap = {},
     ): Promise<TypeRef> {
         const required = new Set(requiredArray);
         const propertiesMap = mapSortBy(mapFromObject(properties), (_, k) =>
@@ -863,6 +864,45 @@ async function addTypesInSchema(
                 additionalLoc,
                 singularizeTypeNames(attributes),
             );
+        }
+
+        // An object with no fixed `properties` whose keys are constrained by
+        // `patternProperties` is a map; its value type is the union of the
+        // pattern schemas (plus `additionalProperties` if that's a schema).
+        // `additionalProperties: true` still means any value.  An absent
+        // `additionalProperties` is treated like `false` here, since the
+        // patterns are what the schema author describes.
+        const patterns = Object.getOwnPropertyNames(patternProperties);
+        if (
+            props.size === 0 &&
+            patterns.length > 0 &&
+            additionalProperties !== true
+        ) {
+            const valueTypes = await arrayMapSync(patterns, async (pattern) => {
+                const patternLoc = loc.push("patternProperties", pattern);
+                return await toType(
+                    checkJSONSchema(
+                        patternProperties[pattern],
+                        patternLoc.canonicalRef,
+                    ),
+                    patternLoc,
+                    singularizeTypeNames(attributes),
+                );
+            });
+            if (
+                additionalProperties !== undefined &&
+                additionalPropertiesType !== undefined
+            ) {
+                valueTypes.push(additionalPropertiesType);
+            }
+
+            additionalPropertiesType =
+                valueTypes.length === 1
+                    ? valueTypes[0]
+                    : typeBuilder.getUnionType(
+                          emptyTypeAttributes,
+                          new Set(valueTypes),
+                      );
         }
 
         const additionalRequired = setSubtract(required, props.keys());
@@ -1146,10 +1186,25 @@ async function addTypesInSchema(
                 }
             }
 
+            let patternProperties: StringMap = {};
+            if (
+                typeof schema.patternProperties === "object" &&
+                schema.patternProperties !== null &&
+                !Array.isArray(schema.patternProperties)
+            ) {
+                patternProperties = checkJSONSchemaObject(
+                    schema.patternProperties,
+                    loc.canonicalRef,
+                );
+            }
+
             let additionalProperties = schema.additionalProperties;
             // This is an incorrect hack to fix an issue with a Go->Schema generator:
             // https://github.com/quicktype/quicktype/issues/976
+            // (Only needed when there are fixed properties; without them
+            // makeObject maps every pattern to the map value type.)
             if (
+                Object.getOwnPropertyNames(properties).length > 0 &&
                 additionalProperties === undefined &&
                 typeof schema.patternProperties === "object" &&
                 hasOwnProperty(schema.patternProperties, ".*")
@@ -1187,6 +1242,7 @@ async function addTypesInSchema(
                 required,
                 additionalProperties,
                 orderKey,
+                patternProperties,
             );
         }
 
@@ -1285,6 +1341,7 @@ async function addTypesInSchema(
             typeSet !== undefined ||
             schema.properties !== undefined ||
             schema.additionalProperties !== undefined ||
+            schema.patternProperties !== undefined ||
             schema.unevaluatedProperties !== undefined ||
             schema.items !== undefined ||
             schema.prefixItems !== undefined ||
