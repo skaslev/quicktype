@@ -1,4 +1,4 @@
-import { arrayIntercalate } from "collection-utils";
+import { arrayIntercalate, iterableSome } from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -1660,7 +1660,27 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
 
         if (!this._options.justTypes) {
             this.emitSupportFunctions4();
+        } else {
+            this.emitJustTypesTopLevelAliases();
         }
+    }
+
+    // The support file, which declares the aliases for top-levels that aren't
+    // classes, enums or unions, isn't emitted in just-types mode.  Emit just
+    // the aliases.
+    private emitJustTypesTopLevelAliases(): void {
+        const needsAlias = (t: Type): boolean =>
+            this.namedTypeToNameForTopLevel(t) === undefined;
+        if (!iterableSome(this.topLevels.values(), needsAlias)) return;
+
+        this.startFile("JSONSchemaSupport");
+        this.emitLineOnce("import Foundation");
+        this.forEachTopLevel(
+            "leading",
+            (t: Type, name: Name) => this.renderTopLevelAlias(t, name),
+            needsAlias,
+        );
+        this.endFile();
     }
 
     private emitAlamofireExtension(): void {
