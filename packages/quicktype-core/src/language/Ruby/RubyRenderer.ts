@@ -940,7 +940,16 @@ export class RubyRenderer extends ConvenienceRenderer {
                 (u, n) => this.emitUnion(u, n),
             );
 
-            if (!this._options.justTypes) {
+            if (this._options.justTypes) {
+                // Without the from_json! wrapper classes, give top-levels that
+                // aren't classes, enums or unions a constant holding their
+                // type, e.g. `TopLevel = Types::String.optional`.
+                this.forEachTopLevel(
+                    "leading-and-interposing",
+                    (t, name) => this.emitLine(name, " = ", this.dryType(t)),
+                    (t) => this.namedTypeToNameForTopLevel(t) === undefined,
+                );
+            } else {
                 this.forEachTopLevel(
                     "leading-and-interposing",
                     (topLevel, name) => {
