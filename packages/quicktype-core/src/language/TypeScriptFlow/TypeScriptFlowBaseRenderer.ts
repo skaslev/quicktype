@@ -20,7 +20,11 @@ import {
     type Type,
     UnionType,
 } from "../../Type/index.js";
-import { matchType, nullableFromUnion } from "../../Type/TypeUtils.js";
+import {
+    isNamedType,
+    matchType,
+    nullableFromUnion,
+} from "../../Type/TypeUtils.js";
 import {
     JavaScriptRenderer,
     type JavaScriptTypeAnnotations,
@@ -46,6 +50,14 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
         }
 
         return super.namerForObjectProperty();
+    }
+
+    protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        if (type instanceof UnionType) {
+            return this.inlinesUnion(type) ? undefined : type;
+        }
+
+        return isNamedType(type) ? type : undefined;
     }
 
     protected get emptyObjectType(): string | undefined {
@@ -309,7 +321,7 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
             this.ensureBlankLine();
             this.emitDescription(this.descriptionForType(t));
             this.emitLine(
-                t.isPrimitive() ? "type " : "export type ",
+                "export type ",
                 name,
                 " = ",
                 this.sourceFor(t).source,
