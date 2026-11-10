@@ -29,11 +29,13 @@ import {
 } from "../../support/Strings.js";
 import { defined, panic } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
-import type {
-    ClassProperty,
-    EnumType,
-    ObjectType,
-    Type,
+import {
+    type ClassProperty,
+    type EnumType,
+    type ObjectType,
+    TupleType,
+    type Type,
+    UnionType,
 } from "../../Type/index.js";
 import {
     directlyReachableTypes,
@@ -48,13 +50,21 @@ function isClass(t: Type): t is ObjectType {
     return t.kind === "class" || t.kind === "object";
 }
 
-// The classes a class's properties refer to, through arrays, maps and unions.
-function referencedClasses(t: Type): ReadonlySet<Type> {
-    if (!isClass(t)) return new Set();
+// The definitions, classes and named tuples, that a class's properties or a
+// named tuple's elements refer to, through arrays, maps, unions and tuples
+// that are spelled out.
+function referencedDefinitions(
+    t: Type,
+    isDefinition: (t: Type) => boolean,
+): ReadonlySet<Type> {
+    if (!isDefinition(t)) return new Set();
+    const children = isClass(t)
+        ? Array.from(t.getProperties().values(), (p) => p.type)
+        : Array.from(t.getNonAttributeChildren());
     return setUnion(
-        ...Array.from(t.getProperties().values(), (p) =>
-            directlyReachableTypes(p.type, (u) =>
-                isClass(u) ? new Set([u]) : null,
+        ...children.map((c) =>
+            directlyReachableTypes(c, (u) =>
+                isDefinition(u) ? new Set([u]) : null,
             ),
         ),
     );
@@ -68,9 +78,10 @@ function unionMemberRank(t: Type): number {
 export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
     private readonly emittedObjects = new Set<Name>();
 
-    private _cyclicClasses: ReadonlySet<Type> | undefined;
+    private _cyclicTypes: ReadonlySet<Type> | undefined;
 
-    // The `<Class>Encoded` interfaces of the classes in cycles.
+    // The `<Class>Encoded` interfaces of the classes in cycles, and the
+    // `<Tuple>Encoded` types of the named tuples in cycles.
     private readonly encodedNames = new Map<Type, Name>();
 
     private readonly encodedNamer = this.makeNamedTypeNamer();
@@ -130,32 +141,56 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         return funPrefixNamer("enum-cases", (s) => this.nameStyle(s, false));
     }
 
-    // The classes that refer to themselves, directly or through other
-    // classes.
-    private get cyclicClasses(): ReadonlySet<Type> {
-        if (this._cyclicClasses === undefined) {
+    // Tuples are spelled out, unless the schema names them or they contain
+    // themselves other than through a class: those are declared as schemas
+    // of their own.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "object", "enum"].includes(c.kind) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
+    }
+
+    private isNamedTuple(t: Type): t is TupleType {
+        return t instanceof TupleType && this.tupleNeedsName(t);
+    }
+
+    // The classes and named tuples that refer to themselves, directly or
+    // through other classes and named tuples.
+    private get cyclicTypes(): ReadonlySet<Type> {
+        if (this._cyclicTypes === undefined) {
+            const referenced = (t: Type): ReadonlySet<Type> =>
+                referencedDefinitions(
+                    t,
+                    (u) => isClass(u) || this.isNamedTuple(u),
+                );
             const cyclic = new Set<Type>();
             const components = this.typeGraph
-                .makeGraph(false, referencedClasses)
+                .makeGraph(false, referenced)
                 .stronglyConnectedComponents().nodes;
             for (const component of components) {
                 const [first] = component;
-                if (component.size > 1 || referencedClasses(first).has(first)) {
+                if (component.size > 1 || referenced(first).has(first)) {
                     setUnionInto(cyclic, component);
                 }
             }
 
-            this._cyclicClasses = cyclic;
+            this._cyclicTypes = cyclic;
         }
 
-        return this._cyclicClasses;
+        return this._cyclicTypes;
     }
 
     protected makeNamedTypeDependencyNames(
         t: Type,
         name: Name,
     ): DependencyName[] {
-        if (!this.cyclicClasses.has(t)) return [];
+        if (!this.cyclicTypes.has(t)) return [];
         const encodedName = new DependencyName(
             this.encodedNamer,
             name.order,
@@ -190,7 +225,12 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         required = true,
         coerceStrings = false,
     ): Sourcelike {
-        if (t.kind === "class" || t.kind === "object" || t.kind === "enum") {
+        if (
+            t.kind === "class" ||
+            t.kind === "object" ||
+            t.kind === "enum" ||
+            this.isNamedTuple(t)
+        ) {
             const name = this.nameForNamedType(t);
             if (this.emittedObjects.has(name)) {
                 return [name];
@@ -198,7 +238,8 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
 
             // TypeScript infers the type of a forward reference, unless the
             // reference is recursive (TS2506).  Then it's annotated, with the
-            // encoded side declared by the class's encoded interface.
+            // encoded side declared by the class's encoded interface, or the
+            // tuple's encoded type.
             const encodedName = this.encodedNames.get(t);
             if (encodedName === undefined) {
                 return ["S.suspend(() => ", name, ")"];
@@ -290,6 +331,7 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
                         : "S.String.pipe(S.pattern(/^-?\\d+$/))";
                 return "S.String";
             },
+            (tupleType) => this.tupleSchema(tupleType),
         );
 
         if (required) {
@@ -299,9 +341,132 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         return match;
     }
 
+    // `S.Tuple(A, B)`, with `S.optionalElement(B)` for an optional item, and
+    // `S.Tuple([A, B], R)` with a rest.
+    private tupleSchema(t: TupleType): Sourcelike {
+        const elements = t.items.map((item, i) => {
+            const schema = this.typeMapTypeFor(item, false);
+            return i < t.minItems
+                ? schema
+                : ["S.optionalElement(", schema, ")"];
+        });
+        if (t.rest === undefined) {
+            return ["S.Tuple(", ...arrayIntercalate(", ", elements), ")"];
+        }
+
+        return [
+            "S.Tuple([",
+            ...arrayIntercalate(", ", elements),
+            "], ",
+            this.typeMapTypeFor(t.rest, false),
+            ")",
+        ];
+    }
+
+    // The TypeScript type `readonly [A, B?, ...R[]]` of a tuple, with
+    // `typeFor` the type of each element.  The rest is `R[]`, since
+    // TypeScript resolves `Array<R>` there eagerly, which fails for a tuple
+    // that contains itself.
+    private tupleTypeFor(
+        t: TupleType,
+        typeFor: (t: Type) => Sourcelike,
+    ): Sourcelike {
+        // `?` and `[]` bind tighter than `|` and `readonly`.
+        const operand = (item: Type): Sourcelike =>
+            item instanceof UnionType ||
+            item.kind === "bool-string" ||
+            (item instanceof TupleType && !this.isNamedTuple(item))
+                ? ["(", typeFor(item), ")"]
+                : typeFor(item);
+        const elements = t.items.map(
+            (item, i): Sourcelike =>
+                i < t.minItems ? typeFor(item) : [operand(item), "?"],
+        );
+        if (t.rest !== undefined) {
+            elements.push(["...", operand(t.rest), "[]"]);
+        }
+
+        return ["readonly [", ...arrayIntercalate(", ", elements), "]"];
+    }
+
+    // The decoded type of the schema typeMapTypeFor renders for `t`, for the
+    // tuples in cycles, whose types must be declared.
+    private decodedTypeFor(t: Type, coerceStrings = false): Sourcelike {
+        if (isClass(t)) {
+            return this.nameForNamedType(t);
+        }
+
+        if (t.kind === "enum" || this.isNamedTuple(t)) {
+            const name = this.nameForNamedType(t);
+            if (this.encodedNames.has(t)) {
+                return name;
+            }
+
+            return ["S.Schema.Type<typeof ", name, ">"];
+        }
+
+        return matchType<Sourcelike>(
+            t,
+            (_anyType) => "any",
+            (_nullType) => "null",
+            (_boolType) => "boolean",
+            (_integerType) => "number",
+            (_doubleType) => "number",
+            (_stringType) => "string",
+            (arrayType) => [
+                "ReadonlyArray<",
+                this.decodedTypeFor(arrayType.items),
+                ">",
+            ],
+            (_classType) => panic("Should already be handled."),
+            (mapType) => [
+                "{ readonly [key: string]: ",
+                this.decodedTypeFor(mapType.values),
+                " }",
+            ],
+            (_enumType) => panic("Should already be handled."),
+            (unionType) => {
+                const coerce = Array.from(unionType.getChildren()).some(
+                    (type) => type.kind === "bool" || type.kind === "integer",
+                );
+                const [nullType, members] = removeNullFromUnion(
+                    unionType,
+                    true,
+                );
+                const types = Array.from(members).sort(
+                    (a, b) => unionMemberRank(a) - unionMemberRank(b),
+                );
+                const decoded = types.map((type) =>
+                    this.decodedTypeFor(type, coerce),
+                );
+                if (nullType !== null) {
+                    decoded.push("null");
+                }
+
+                return arrayIntercalate(" | ", decoded);
+            },
+            (transformedStringType) => {
+                if (transformedStringType.kind === "bool-string")
+                    return coerceStrings ? "boolean" : '"true" | "false"';
+                if (transformedStringType.kind === "integer-string")
+                    return coerceStrings ? "number" : "string";
+                return "string";
+            },
+            (tupleType) =>
+                this.tupleTypeFor(tupleType, (item) =>
+                    this.decodedTypeFor(item),
+                ),
+        );
+    }
+
     // The encoded type of the schema typeMapTypeFor renders for `t`.
     private encodedTypeFor(t: Type): Sourcelike {
-        if (t.kind === "class" || t.kind === "object" || t.kind === "enum") {
+        if (
+            t.kind === "class" ||
+            t.kind === "object" ||
+            t.kind === "enum" ||
+            this.isNamedTuple(t)
+        ) {
             const encodedName = this.encodedNames.get(t);
             if (encodedName !== undefined) {
                 return encodedName;
@@ -350,6 +515,10 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
                 transformedStringType.kind === "bool-string"
                     ? '"true" | "false"'
                     : "string",
+            (tupleType) =>
+                this.tupleTypeFor(tupleType, (item) =>
+                    this.encodedTypeFor(item),
+                ),
         );
     }
 
@@ -440,6 +609,56 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         this.emittedObjects.add(name);
     }
 
+    // A tuple with a name: one the schema names, or a recursive one.  The
+    // type of a tuple in a cycle can't be `S.Schema.Type<typeof X>`, which
+    // would refer to itself, so it's spelled out, like its encoded type.
+    private emitTuple(name: Name, t: TupleType): void {
+        this.ensureBlankLine();
+        const encodedName = this.encodedNames.get(t);
+        if (encodedName === undefined) {
+            this.emitLine(
+                "\nexport const ",
+                name,
+                " = ",
+                this.tupleSchema(t),
+                ";",
+            );
+            if (!this._options.justSchema) {
+                this.emitLine(
+                    "export type ",
+                    name,
+                    " = S.Schema.Type<typeof ",
+                    name,
+                    ">;",
+                );
+            }
+        } else {
+            this.emitLine(
+                "\nexport type ",
+                name,
+                " = ",
+                this.tupleTypeFor(t, (item) => this.decodedTypeFor(item)),
+                ";",
+            );
+            this.emitLine(
+                "export type ",
+                encodedName,
+                " = ",
+                this.tupleTypeFor(t, (item) => this.encodedTypeFor(item)),
+                ";",
+            );
+            this.emitLine(
+                "export const ",
+                name,
+                " = ",
+                this.tupleSchema(t),
+                ";",
+            );
+        }
+
+        this.emittedObjects.add(name);
+    }
+
     private emitEnum(e: EnumType, enumName: Name): void {
         this.emittedObjects.add(enumName);
         this.ensureBlankLine();
@@ -462,31 +681,6 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         }
     }
 
-    // The classes that `types` are or refer to, through arrays, maps and
-    // unions.
-    private referencedObjects(types: Iterable<Type>): ObjectType[] {
-        const objects: ObjectType[] = [];
-        const visited = new Set<Type>();
-        const recurse = (type: Type): void => {
-            if (visited.has(type)) return;
-            visited.add(type);
-            if (type.kind === "object" || type.kind === "class") {
-                objects.push(type as ObjectType);
-                return;
-            }
-
-            for (const child of type.getNonAttributeChildren()) {
-                recurse(child);
-            }
-        };
-
-        for (const type of types) {
-            recurse(type);
-        }
-
-        return objects;
-    }
-
     protected emitSchemas(): void {
         this.ensureBlankLine();
 
@@ -497,32 +691,41 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
             },
         );
 
-        // Each class comes after the classes it refers to, so only the
-        // references around a cycle are forward references, which need
-        // `S.suspend`.
-        const names = new Map<ObjectType, Name>();
-        this.forEachObject("none", (type: ObjectType, name: Name) => {
+        // Each class and named tuple comes after the ones it refers to, so
+        // only the references around a cycle are forward references, which
+        // need `S.suspend`.
+        const names = new Map<Type, Name>();
+        const add = (type: ObjectType | TupleType, name: Name): void => {
             names.set(type, name);
-        });
-        const order: ObjectType[] = [];
-        const visited = new Set<ObjectType>();
-        const visit = (type: ObjectType): void => {
+        };
+        this.forEachObject("none", add);
+        // Named tuples are ordered like classes.
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, add);
+        const isDefinition = (t: Type): boolean =>
+            isClass(t) || this.isNamedTuple(t);
+        const order: Type[] = [];
+        const visited = new Set<Type>();
+        const visit = (type: Type): void => {
             if (visited.has(type) || !names.has(type)) return;
             visited.add(type);
-            const propertyTypes: Type[] = [];
-            this.forEachClassProperty(type, "none", (_, __, prop) => {
-                propertyTypes.push(prop.type);
-            });
-            for (const referenced of this.referencedObjects(propertyTypes)) {
+            for (const referenced of referencedDefinitions(
+                type,
+                isDefinition,
+            )) {
                 visit(referenced);
             }
 
             order.push(type);
         };
-        // Starting from the top-levels puts them after the classes they
+        // Starting from the top-levels puts them after the definitions they
         // refer to even in a cycle.
-        for (const type of this.referencedObjects(this.topLevels.values())) {
-            visit(type);
+        for (const topLevel of this.topLevels.values()) {
+            for (const type of directlyReachableTypes(topLevel, (u) =>
+                isDefinition(u) ? new Set([u]) : null,
+            )) {
+                visit(type);
+            }
         }
 
         for (const type of names.keys()) {
@@ -530,15 +733,24 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         }
 
         for (const type of order) {
+            const name = defined(names.get(type));
             this.emitGatheredSource(
                 this.gatherSource(() => {
-                    this.emitObject(defined(names.get(type)), type);
+                    if (type instanceof TupleType) {
+                        this.emitTuple(name, type);
+                    } else if (isClass(type)) {
+                        this.emitObject(name, type);
+                    }
                 }),
             );
         }
 
         this.forEachTopLevel("none", (type, name) => {
-            if (["class", "object", "enum"].includes(type.kind)) return;
+            if (
+                ["class", "object", "enum"].includes(type.kind) ||
+                this.isNamedTuple(type)
+            )
+                return;
 
             this.ensureBlankLine();
             const schema = this.typeMapTypeFor(type);

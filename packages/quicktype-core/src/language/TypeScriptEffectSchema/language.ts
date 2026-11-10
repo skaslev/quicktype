@@ -9,6 +9,7 @@ import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
 } from "../../Type/index.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
@@ -51,6 +52,12 @@ export class TypeScriptEffectSchemaTargetLanguage extends TargetLanguage<
 
     public get supportsOptionalClassProperties(): boolean {
         return true;
+    }
+
+    // S.Tuple expresses every tuple: S.optionalElement for optional items,
+    // and a rest.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     public getOptions(): typeof typeScriptEffectSchemaOptions {
