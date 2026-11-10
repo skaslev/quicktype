@@ -27,6 +27,7 @@ import {
     UnionType,
 } from "../../Type/index.js";
 import {
+    isNamedType,
     matchType,
     nullableFromUnion,
     removeNullFromUnion,
@@ -281,25 +282,75 @@ export class PikeRenderer extends ConvenienceRenderer {
 });`);
                 } else if (t.items instanceof PrimitiveType)
                     this.emitLine(["return json;"]);
-                else
-                    this.emitLine([
-                        "return map(json, ",
-                        this.sourceFor(t.items).source,
-                        "_from_JSON);",
-                    ]);
+                else this.emitLine(["return ", this.fromJSON(t, "json"), ";"]);
             } else if (t instanceof MapType) {
                 const type = this.sourceFor(t.values).source;
                 this.emitLine(["mapping(string:", type, ") retval = ([]);"]);
                 let assignmentRval: Sourcelike;
                 if (t.values instanceof PrimitiveType)
                     assignmentRval = ["(", type, ") v"];
-                else assignmentRval = [type, "_from_JSON(v)"];
+                else assignmentRval = this.fromJSON(t.values, "v");
                 this.emitBlock(["foreach (json; string k; mixed v)"], () => {
                     this.emitLine(["retval[k] = ", assignmentRval, ";"]);
                 });
                 this.emitLine(["return retval;"]);
+            } else {
+                // e.g. a nullable top-level (`T | null`)
+                this.emitLine(["return ", this.fromJSON(t, "json"), ";"]);
             }
         });
+    }
+
+    // An expression converting the decoded JSON value `value` to `t`.  Named
+    // types have a `_from_JSON` function; arrays and maps (e.g. arrays of
+    // arrays) are converted element-wise.
+    // Named types (classes, enums and unions that are declared) have a
+    // `<Name>_from_JSON` function.
+    private hasFromJSON(t: Type): boolean {
+        return (
+            isNamedType(t) &&
+            !(t instanceof UnionType && !this.unionNeedsName(t))
+        );
+    }
+
+    private fromJSON(t: Type, value: string): Sourcelike {
+        if (this.hasFromJSON(t)) {
+            return [this.nameForNamedType(t), "_from_JSON(", value, ")"];
+        }
+
+        if (t instanceof ArrayType && !(t.items instanceof PrimitiveType)) {
+            if (this.hasFromJSON(t.items)) {
+                return [
+                    "map(",
+                    value,
+                    ", ",
+                    this.nameForNamedType(t.items),
+                    "_from_JSON)",
+                ];
+            }
+
+            return [
+                "map(",
+                value,
+                ", lambda(mixed v) { return ",
+                this.fromJSON(t.items, "v"),
+                "; })",
+            ];
+        }
+
+        if (t instanceof MapType && !(t.values instanceof PrimitiveType)) {
+            return [
+                "mkmapping(indices(",
+                value,
+                "), map(values(",
+                value,
+                "), lambda(mixed v) { return ",
+                this.fromJSON(t.values, "v"),
+                "; }))",
+            ];
+        }
+
+        return value;
     }
 
     private emitEncodingFunction(c: ClassType): void {
