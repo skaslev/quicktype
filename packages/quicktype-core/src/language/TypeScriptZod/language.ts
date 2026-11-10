@@ -5,6 +5,7 @@ import {
     type IntegerRange,
 } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type {
     PrimitiveStringTypeKind,
@@ -52,6 +53,12 @@ export class TypeScriptZodTargetLanguage extends TargetLanguage<
 
     public get supportsOptionalClassProperties(): boolean {
         return true;
+    }
+
+    // z.tuple() with .rest() covers fixed items and a rest.  zod 3 requires
+    // every item, so a tuple with optional items is a union of tuples.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "typescript-zod">(

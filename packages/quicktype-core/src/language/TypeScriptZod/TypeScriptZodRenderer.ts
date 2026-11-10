@@ -31,7 +31,9 @@ import {
     type EnumType,
     ObjectType,
     SetOperationType,
+    TupleType,
     type Type,
+    UnionType,
 } from "../../Type/index.js";
 import { matchType } from "../../Type/TypeUtils.js";
 import { legalizeName } from "../JavaScript/utils.js";
@@ -39,9 +41,9 @@ import { legalizeName } from "../JavaScript/utils.js";
 import type { typeScriptZodOptions } from "./language.js";
 
 export class TypeScriptZodRenderer extends ConvenienceRenderer {
-    /** TypeRefs of object types that participate in a reference cycle.
-     * These must be emitted as z.lazy() schemas with an explicit type
-     * annotation, since zod cannot infer recursive types. */
+    /** TypeRefs of object types and named tuples that participate in a
+     * reference cycle.  These must be emitted as z.lazy() schemas with an
+     * explicit type annotation, since zod cannot infer recursive types. */
     private _recursiveTypeRefs: Set<number> = new Set();
 
     public constructor(
@@ -87,6 +89,25 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         return funPrefixNamer("enum-cases", (s) => this.nameStyle(s, false));
     }
 
+    /** Tuples are spelled out, unless the schema names them or they contain
+     * themselves other than through a named schema: such a tuple needs a
+     * schema of its own to refer to. */
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "object", "enum"].includes(c.kind) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
+    }
+
+    private isNamedTuple(t: Type): t is TupleType {
+        return t instanceof TupleType && this.tupleNeedsName(t);
+    }
+
     protected importStatement(
         lhs: Sourcelike,
         moduleName: Sourcelike,
@@ -105,7 +126,10 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
     }
 
     protected typeMapTypeFor(t: Type, required = true): Sourcelike {
-        if (["class", "object", "enum"].includes(t.kind)) {
+        if (
+            ["class", "object", "enum"].includes(t.kind) ||
+            this.isNamedTuple(t)
+        ) {
             return [this.nameForNamedType(t), "Schema"];
         }
 
@@ -215,6 +239,7 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
 
                 return "z.string()";
             },
+            (tupleType) => this.tupleSchema(tupleType),
         );
 
         if (required) {
@@ -222,6 +247,45 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         }
 
         return match;
+    }
+
+    /** The tuples a tuple with optional items stands for, longest first:
+     * one per number of items it can have, the longest with the rest.
+     * zod 3's z.tuple() rejects arrays that lack an item, even an
+     * optional one, so `[A, B?, ...R[]]` is `[A, B, ...R[]] | [A]`. */
+    private tupleAlternatives(
+        t: TupleType,
+        sourceFor: (t: Type) => Sourcelike,
+    ): Array<{ items: Sourcelike[]; rest: Sourcelike | undefined }> {
+        const items = t.items.map(sourceFor);
+        const rest = t.rest === undefined ? undefined : sourceFor(t.rest);
+        const alternatives = [];
+        for (let n = items.length; n >= t.minItems; n--) {
+            alternatives.push({
+                items: items.slice(0, n),
+                rest: n === items.length ? rest : undefined,
+            });
+        }
+
+        return alternatives;
+    }
+
+    private tupleSchema(t: TupleType): Sourcelike {
+        const tuples = this.tupleAlternatives(t, (item) =>
+            this.typeMapTypeFor(item, false),
+        ).map(
+            ({ items, rest }): Sourcelike => [
+                "z.tuple([",
+                ...arrayIntercalate(", ", items),
+                "])",
+                rest === undefined ? "" : [".rest(", rest, ")"],
+            ],
+        );
+        if (tuples.length === 1) {
+            return tuples[0];
+        }
+
+        return ["z.union([", ...arrayIntercalate(", ", tuples), "])"];
     }
 
     /** TypeScript type for `t`, used to annotate recursive schemas for
@@ -235,7 +299,10 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
      * `sourceFor` is shaped by ts/flow-specific options like
      * `preferConstValues` and `declareUnions` that don't exist here. */
     protected underlyingTypeFor(t: Type): Sourcelike {
-        if (["class", "object", "enum"].includes(t.kind)) {
+        if (
+            ["class", "object", "enum"].includes(t.kind) ||
+            this.isNamedTuple(t)
+        ) {
             return this.nameForNamedType(t);
         }
 
@@ -272,10 +339,35 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
 
                 return "string";
             },
+            (tupleType) => this.underlyingTypeForTuple(tupleType),
         );
     }
 
-    protected isRecursive(t: ObjectType): boolean {
+    /** The rest is `...R[]`: TypeScript resolves `...Array<R>` eagerly,
+     * which fails for a tuple that contains itself. */
+    private underlyingTypeForTuple(t: TupleType): Sourcelike {
+        // `[]` binds tighter than `|`.
+        const restNeedsParens =
+            t.rest instanceof UnionType ||
+            (t.rest instanceof TupleType && !this.isNamedTuple(t.rest));
+        const tuples = this.tupleAlternatives(t, (item) =>
+            this.underlyingTypeFor(item),
+        ).map(({ items, rest }): Sourcelike => {
+            const elements = [...items];
+            if (rest !== undefined) {
+                elements.push(
+                    restNeedsParens
+                        ? ["...(", rest, ")[]"]
+                        : ["...", rest, "[]"],
+                );
+            }
+
+            return ["[", ...arrayIntercalate(", ", elements), "]"];
+        });
+        return arrayIntercalate(" | ", tuples);
+    }
+
+    protected isRecursive(t: Type): boolean {
         return this._recursiveTypeRefs.has(t.typeRef);
     }
 
@@ -377,6 +469,61 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         this.emitLine(");");
     }
 
+    /** Emit a tuple that has a name: one the schema names, or a recursive
+     * one.  A recursive tuple is declared like a recursive object: its type
+     * explicitly, its schema wrapped in z.lazy(). */
+    protected emitTuple(name: Name, t: TupleType): void {
+        this.ensureBlankLine();
+        if (!this.isRecursive(t)) {
+            this.emitLine(
+                "\nexport const ",
+                name,
+                "Schema = ",
+                this.tupleSchema(t),
+                ";",
+            );
+            if (!this._options.justSchema) {
+                this.emitLine(
+                    "export type ",
+                    name,
+                    " = z.infer<typeof ",
+                    name,
+                    "Schema>;",
+                );
+            }
+
+            return;
+        }
+
+        if (this._options.justSchema) {
+            this.emitLine(
+                "\nexport const ",
+                name,
+                "Schema: z.ZodType<any> = z.lazy(() => ",
+                this.tupleSchema(t),
+                ");",
+            );
+            return;
+        }
+
+        this.emitLine(
+            "\nexport type ",
+            name,
+            " = ",
+            this.underlyingTypeForTuple(t),
+            ";",
+        );
+        this.emitLine(
+            "export const ",
+            name,
+            "Schema: z.ZodType<",
+            name,
+            "> = z.lazy(() => ",
+            this.tupleSchema(t),
+            ");",
+        );
+    }
+
     protected emitEnum(e: EnumType, enumName: Name): void {
         this.ensureBlankLine();
         this.emitDescription(this.descriptionForType(e));
@@ -398,14 +545,14 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         }
     }
 
-    /** Static function that extracts underlying type refs for types that form part of the
+    /** Function that extracts underlying type refs for types that form part of the
      * definition of the passed type - used to ensure that these appear in generated source
      * before types that reference them.
      *
      * Primitive types don't need defining and enums are output before other types, hence,
      * these are ignored.
      */
-    private static extractUnderlyingTyperefs(type: Type): number[] {
+    private extractUnderlyingTyperefs(type: Type): number[] {
         const typeRefs: number[] = [];
         // Ignore enums and primitives
         if (!type.isPrimitive() && type.kind !== "enum") {
@@ -414,11 +561,7 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
             if (type instanceof SetOperationType) {
                 (type as SetOperationType).members.forEach((member) => {
                     // recurse as the underlying type could itself be a union, instersection or array etc.
-                    typeRefs.push(
-                        ...TypeScriptZodRenderer.extractUnderlyingTyperefs(
-                            member,
-                        ),
-                    );
+                    typeRefs.push(...this.extractUnderlyingTyperefs(member));
                 });
             }
 
@@ -427,11 +570,7 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
                 const addType = (type as ObjectType).getAdditionalProperties();
                 if (addType) {
                     // recurse as the underlying type could itself be a union, instersection or array etc.
-                    typeRefs.push(
-                        ...TypeScriptZodRenderer.extractUnderlyingTyperefs(
-                            addType,
-                        ),
-                    );
+                    typeRefs.push(...this.extractUnderlyingTyperefs(addType));
                 }
             }
 
@@ -440,16 +579,19 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
                 const itemsType = (type as ArrayType).items;
                 if (itemsType) {
                     // recurse as the underlying type could itself be a union, instersection or array etc.
-                    typeRefs.push(
-                        ...TypeScriptZodRenderer.extractUnderlyingTyperefs(
-                            itemsType,
-                        ),
-                    );
+                    typeRefs.push(...this.extractUnderlyingTyperefs(itemsType));
                 }
             }
 
-            // Finally return the reference to a class as that will need to be defined (where objects, maps, unions, intersections and arrays do not)
-            if (type instanceof ClassType) {
+            // need to extract the items of tuples that are spelled out
+            if (type instanceof TupleType && !this.tupleNeedsName(type)) {
+                for (const child of type.getNonAttributeChildren()) {
+                    typeRefs.push(...this.extractUnderlyingTyperefs(child));
+                }
+            }
+
+            // Finally return the reference to a class or a named tuple as that will need to be defined (where objects, maps, unions, intersections, arrays and other tuples do not)
+            if (type instanceof ClassType || this.isNamedTuple(type)) {
                 typeRefs.push(type.typeRef);
             }
         }
@@ -473,12 +615,12 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         // generated sourcecode
 
         const order: number[] = [];
-        const mapType: ObjectType[] = [];
+        const mapType: Array<ObjectType | TupleType> = [];
         const mapTypeRef: number[] = [];
         const mapName: Name[] = [];
         const mapChildTypeRefs: number[][] = [];
 
-        this.forEachObject("none", (type: ObjectType, name: Name) => {
+        const addType = (type: ObjectType | TupleType, name: Name): void => {
             mapType.push(type);
             mapTypeRef.push(type.typeRef);
             mapName.push(name);
@@ -488,11 +630,16 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
 
             children.forEach((child) => {
                 childTypeRefs = childTypeRefs.concat(
-                    TypeScriptZodRenderer.extractUnderlyingTyperefs(child),
+                    this.extractUnderlyingTyperefs(child),
                 );
             });
             mapChildTypeRefs.push(childTypeRefs);
-        });
+        };
+
+        this.forEachObject("none", addType);
+        // Named tuples are ordered, and may be recursive, like objects.
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, addType);
 
         // Find types that participate in a reference cycle: types from
         // which we can get back to the same type by following child type
@@ -595,14 +742,23 @@ export class TypeScriptZodRenderer extends ConvenienceRenderer {
         order.forEach((i) => {
             this.emitGatheredSource(
                 this.gatherSource(() => {
-                    this.emitObject(mapName[i], mapType[i]);
+                    const type = mapType[i];
+                    if (type instanceof TupleType) {
+                        this.emitTuple(mapName[i], type);
+                    } else {
+                        this.emitObject(mapName[i], type);
+                    }
                 }),
             );
         });
 
         this.forEachTopLevel("none", (type, name) => {
             // Named top levels were already emitted above with this name.
-            if (["class", "object", "enum"].includes(type.kind)) return;
+            if (
+                ["class", "object", "enum"].includes(type.kind) ||
+                this.isNamedTuple(type)
+            )
+                return;
 
             this.ensureBlankLine();
             this.emitLine(
