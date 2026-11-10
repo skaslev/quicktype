@@ -46,6 +46,8 @@ export class PythonRenderer extends ConvenienceRenderer {
 
     private readonly declaredTypes: Set<Type> = new Set();
 
+    private _unionClasses: ReadonlySet<Type> | undefined;
+
     public constructor(
         targetLanguage: TargetLanguage,
         renderContext: RenderContext,
@@ -473,14 +475,45 @@ export class PythonRenderer extends ConvenienceRenderer {
         return result;
     }
 
+    // Whether `c` is one of several classes of a union.  A union only has
+    // several classes if they don't allow additional properties, so their
+    // values can be told apart by their properties.
+    protected isUnionClass(c: ClassType): boolean {
+        if (this._unionClasses === undefined) {
+            const unionClasses = new Set<Type>();
+            for (const t of this.typeGraph.allTypesUnordered()) {
+                if (!(t instanceof UnionType)) continue;
+                const classes = Array.from(t.members).filter(
+                    (m) => m instanceof ClassType,
+                );
+                if (classes.length < 2) continue;
+                for (const m of classes) unionClasses.add(m);
+            }
+
+            this._unionClasses = unionClasses;
+        }
+
+        return this._unionClasses.has(c);
+    }
+
     protected declarationLine(t: Type): Sourcelike {
         if (t instanceof ClassType) {
             if (this.pyOptions.pydanticBaseModel) {
+                // pydantic takes a value for a member of a union that
+                // validates it: the first one (pydantic 1, or the
+                // `left_to_right` mode), or the one that sets the most
+                // fields.  A model ignores unknown fields by default, so it
+                // validates the values of another model that has all its
+                // required fields, dropping the others.  The classes of a
+                // union don't allow additional properties, so their models
+                // forbid them (as class arguments, which pydantic 1 and 2
+                // take), and each model only takes values of its own.
                 return [
                     "class ",
                     this.nameForNamedType(t),
                     "(",
                     this.withImport("pydantic", "BaseModel"),
+                    this.isUnionClass(t) ? ', extra="forbid"' : "",
                     "):",
                 ];
             }

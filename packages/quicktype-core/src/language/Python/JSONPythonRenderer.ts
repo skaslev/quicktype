@@ -1422,6 +1422,28 @@ export class JSONPythonRenderer extends PythonRenderer {
         return [fromJSON, toJSON];
     }
 
+    // `from_union` tries the members of a union in turn, and `from_dict`
+    // takes any `dict` that has the required properties of its class, so it
+    // would take the values of another class that has them too, dropping
+    // their other properties.  The classes of a union don't allow additional
+    // properties, so their `from_dict` rejects them, and each class only
+    // takes values of its own.
+    protected emitUnknownPropertiesCheck(t: ClassType): void {
+        const jsonNames: Sourcelike[] = [];
+        this.forEachClassProperty(t, "none", (_name, jsonName) => {
+            jsonNames.push(this.string(jsonName));
+        });
+        if (jsonNames.length === 0) {
+            this.emitLine("assert not obj");
+        } else {
+            this.emitLine(
+                "assert set(obj) <= {",
+                arrayIntercalate(", ", jsonNames),
+                "}",
+            );
+        }
+    }
+
     protected emitClassMembers(t: ClassType): void {
         super.emitClassMembers(t);
         this.ensureBlankLine();
@@ -1441,6 +1463,9 @@ export class JSONPythonRenderer extends PythonRenderer {
                 const args: Sourcelike[] = [];
                 const aliasArgs: Sourcelike[] = [];
                 this.emitLine("assert isinstance(obj, dict)");
+                if (this.isUnionClass(t)) {
+                    this.emitUnknownPropertiesCheck(t);
+                }
                 this.forEachClassProperty(t, "none", (name, jsonName, cp) => {
                     const property = {
                         value: cp.isOptional

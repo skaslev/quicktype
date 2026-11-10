@@ -149,6 +149,10 @@ export class PythonTargetLanguage extends TargetLanguage<
         return options.pydanticBaseModel ? "fixed" : "full";
     }
 
+    public get supportsUnionsWithMultipleClasses(): boolean {
+        return true;
+    }
+
     public needsTransformerForType(t: Type): boolean {
         if (t instanceof UnionType) {
             return iterableSome(t.members, (m) =>
