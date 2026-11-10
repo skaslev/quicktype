@@ -1,3 +1,5 @@
+import { arrayIntercalate } from "collection-utils";
+
 import { minMaxItemsForType } from "../../attributes/Constraints.js";
 import type { Name } from "../../Naming.js";
 import {
@@ -12,7 +14,9 @@ import {
     type ArrayType,
     type ClassType,
     EnumType,
+    ObjectType,
     type Type,
+    UnionType,
 } from "../../Type/index.js";
 import { isNamedType } from "../../Type/TypeUtils.js";
 import type { JavaScriptTypeAnnotations } from "../JavaScript/index.js";
@@ -36,6 +40,26 @@ export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
 
     protected forbiddenNamesForGlobalNamespace(): string[] {
         return ["Array", "Date", "Convert"];
+    }
+
+    // A union only keeps classes apart that don't allow additional
+    // properties, so an empty one only takes empty objects here.  Checking
+    // it as any object, like other empty classes, would also take the values
+    // of the other classes.
+    protected typeMapTypeFor(t: Type): Sourcelike {
+        if (!(t instanceof UnionType)) return super.typeMapTypeFor(t);
+
+        const members = Array.from(t.getChildren());
+        if (members.filter((m) => m instanceof ObjectType).length < 2) {
+            return super.typeMapTypeFor(t);
+        }
+
+        const children = members.map((m) =>
+            this.emptyObjectTypeFor(m) === undefined
+                ? this.typeMapTypeFor(m)
+                : "o([], false)",
+        );
+        return ["u(", ...arrayIntercalate(", ", children), ")"];
     }
 
     // An array with `minItems` >= 1 becomes a tuple that spells out the
