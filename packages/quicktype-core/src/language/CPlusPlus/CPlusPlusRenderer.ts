@@ -1391,7 +1391,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             [this._options.codeFormat ? "class " : "struct ", className],
             true,
             () => {
-                const constraints = this.generateClassConstraints(c);
+                // Constraints are checked by the setters, with the
+                // ClassMemberConstraints and CheckConstraint helpers that
+                // just-types output doesn't have.
+                const constraints = this._options.justTypes
+                    ? undefined
+                    : this.generateClassConstraints(c);
                 if (this._options.codeFormat) {
                     this.emitLine("public:");
                     if (constraints === undefined) {
@@ -3108,6 +3113,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     private get haveConstraintClasses(): boolean {
         return (
             this._options.codeFormat &&
+            !this._options.justTypes &&
             iterableSome(
                 this.typeGraph.allTypesUnordered(),
                 (t) => constraintsForType(t) !== undefined,
@@ -3259,8 +3265,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 this.emitInclude(true, "optional");
             }
 
-            this.emitInclude(true, "stdexcept");
-            this.emitInclude(true, "regex");
+            // Just-types output has no code that throws or matches patterns.
+            if (!this._options.justTypes) {
+                this.emitInclude(true, "stdexcept");
+                this.emitInclude(true, "regex");
+            }
         }
 
         if (this.haveConstraintClasses) {
