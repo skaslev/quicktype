@@ -1177,9 +1177,12 @@ def decode(value) do
 	else
 			{:error, "Unexpected value when decoding atom: #{inspect(value)}"}
 	end
-end
-
-def from_json(json) do
+end`);
+                // The JSON helpers need Jason, which just-types output
+                // doesn't depend on.
+                if (this._options.justTypes) return;
+                this.ensureBlankLine();
+                this.emitMultiline(`def from_json(json) do
 	json
 	|> Jason.decode!()
 	|> decode()
@@ -1226,6 +1229,24 @@ end`);
             (e, n) => this.emitEnum(e, n),
             (u, n) => this.emitUnion(u, n),
         );
+
+        if (this._options.justTypes) {
+            // A typespec module for top-levels that aren't classes or enums,
+            // e.g. `@type t :: String.t() | nil`.  Unions aren't declared in
+            // Elixir, so union top-levels get one too.
+            this.forEachTopLevel(
+                "leading-and-interposing",
+                (t, name) => {
+                    this.emitBlock(
+                        ["defmodule ", this.nameWithNamespace(name), " do"],
+                        () => this.emitLine("@type t :: ", this.elixirType(t)),
+                    );
+                },
+                (t) =>
+                    this.namedTypeToNameForTopLevel(t) === undefined ||
+                    t instanceof UnionType,
+            );
+        }
 
         if (!this._options.justTypes) {
             this.forEachTopLevel(
