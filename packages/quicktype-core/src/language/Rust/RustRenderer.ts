@@ -17,7 +17,7 @@ import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import { defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
-    type ClassType,
+    ClassType,
     type EnumType,
     TupleType,
     type Type,
@@ -45,6 +45,8 @@ import {
 } from "./utils.js";
 
 export class RustRenderer extends ConvenienceRenderer {
+    private _unionClasses: ReadonlySet<Type> | undefined;
+
     public constructor(
         targetLanguage: TargetLanguage,
         renderContext: RenderContext,
@@ -284,6 +286,31 @@ export class RustRenderer extends ConvenienceRenderer {
         return "";
     }
 
+    // Whether `c` is one of several classes of a union.  serde tries the
+    // variants of an untagged enum in turn, and a struct ignores unknown
+    // fields by default, so it would take the values of the other structs,
+    // too, if it doesn't require any of their fields.  A union only has
+    // several classes if they don't allow additional properties, so their
+    // structs reject unknown fields, and every variant only takes values of
+    // its own.
+    private isUnionClass(c: ClassType): boolean {
+        if (this._unionClasses === undefined) {
+            const unionClasses = new Set<Type>();
+            for (const t of this.typeGraph.allTypesUnordered()) {
+                if (!(t instanceof UnionType)) continue;
+                const classes = Array.from(t.members).filter(
+                    (m) => m instanceof ClassType,
+                );
+                if (classes.length < 2) continue;
+                for (const m of classes) unionClasses.add(m);
+            }
+
+            this._unionClasses = unionClasses;
+        }
+
+        return this._unionClasses.has(c);
+    }
+
     protected emitStructDefinition(c: ClassType, className: Name): void {
         this.emitDescription(this.descriptionForType(c));
         this.emitLine(
@@ -309,6 +336,10 @@ export class RustRenderer extends ConvenienceRenderer {
         );
         if (preferedNamingStyle !== defaultStyle) {
             this.emitLine(`#[serde(rename_all = "${preferedNamingStyle}")]`);
+        }
+
+        if (this.isUnionClass(c)) {
+            this.emitLine("#[serde(deny_unknown_fields)]");
         }
 
         const blankLines =
