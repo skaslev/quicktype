@@ -130,11 +130,23 @@ export class PythonTargetLanguage extends TargetLanguage<
         return false;
     }
 
-    // `Tuple[A, B]` (`tuple[A, B]` from 3.9).  Optional items would take a
-    // union of tuples, and a rest `tuple[A, *tuple[R, ...]]`, which needs
-    // Python 3.11.
+    // `Tuple[A, B]` (`tuple[A, B]` from 3.9), whatever the options.
     public get tupleSupport(): TupleSupport {
         return "fixed";
+    }
+
+    // Optional items take a union of tuples, `Union[Tuple[A], Tuple[A,
+    // B]]`, and a rest `Tuple[A, Unpack[Tuple[R, ...]]]` with
+    // `typing_extensions` (`tuple[A, *tuple[R, ...]]` is Python 3.11).
+    // pydantic validates neither `Unpack` nor `*tuple`.
+    public getTupleSupport(
+        rendererOptions: Record<string, unknown> = {},
+    ): TupleSupport {
+        const options = getOptionValues(
+            pythonOptions,
+            rendererOptions as RendererOptions<"python">,
+        );
+        return options.pydanticBaseModel ? "fixed" : "full";
     }
 
     public needsTransformerForType(t: Type): boolean {

@@ -691,60 +691,88 @@ export class JSONPythonRenderer extends PythonRenderer {
     }
 
     // A JSON array with an element of the right type in each position.
+    // The items after the first `min_items` may be missing, and elements
+    // after all of them are converted with `rest`, if allowed.
     protected emitFromTupleConverter(): void {
+        this.emitTupleConverter("from_tuple", "list", [
+            this.pyOptions.features.builtinGenerics
+                ? "tuple"
+                : this.withTyping("Tuple"),
+            "[",
+            this.withTyping("Any"),
+            ", ...]",
+        ]);
+    }
+
+    protected emitToTupleConverter(): void {
+        this.emitTupleConverter("to_tuple", "tuple", [
+            this.pyOptions.features.builtinGenerics
+                ? "list"
+                : this.withTyping("List"),
+            "[",
+            this.withTyping("Any"),
+            "]",
+        ]);
+    }
+
+    private emitTupleConverter(
+        name: string,
+        sourceType: string,
+        resultType: Sourcelike,
+    ): void {
+        // PEP 8 spaces the `=` of annotated arguments only.
+        const defaultNone = this.pyOptions.features.typeHints
+            ? " = None"
+            : "=None";
+        const converter: Sourcelike = [
+            this.withTyping("Callable"),
+            "[[",
+            this.withTyping("Any"),
+            "], ",
+            this.withTyping("Any"),
+            "]",
+        ];
         this.emitBlock(
             [
-                "def from_tuple(fs",
+                "def ",
+                name,
+                "(fs",
                 this.typeHint(": ", this.converterListType()),
                 ", ",
                 this.typingDecl("x", "Any"),
+                ", min_items",
+                this.typeHint(": ", this.optionalType("int")),
+                defaultNone,
+                ", rest",
+                this.typeHint(": ", this.optionalType(converter)),
+                defaultNone,
                 ")",
-                this.typeHint(
-                    " -> ",
-                    this.pyOptions.features.builtinGenerics
-                        ? "tuple"
-                        : this.withTyping("Tuple"),
-                    "[",
-                    this.withTyping("Any"),
-                    ", ...]",
-                ),
+                this.typeHint(" -> ", resultType),
                 ":",
             ],
             () => {
                 this.emitLine(
-                    "assert isinstance(x, list) and len(x) == len(fs)",
+                    "assert isinstance(x, ",
+                    sourceType,
+                    ") and (len(fs) if min_items is None else min_items) <= len(x)",
                 );
-                this.emitLine("return tuple(f(y) for (f, y) in zip(fs, x))");
+                this.emitLine("assert len(x) <= len(fs) or rest is not None");
+                this.emitLine("result = [f(y) for (f, y) in zip(fs, x)]");
+                this.emitBlock("if rest is not None:", () =>
+                    this.emitLine("result += [rest(y) for y in x[len(fs):]]"),
+                );
+                this.emitLine(
+                    "return ",
+                    sourceType === "list" ? "tuple(result)" : "result",
+                );
             },
         );
     }
 
-    protected emitToTupleConverter(): void {
-        this.emitBlock(
-            [
-                "def to_tuple(fs",
-                this.typeHint(": ", this.converterListType()),
-                ", ",
-                this.typingDecl("x", "Any"),
-                ")",
-                this.typeHint(
-                    " -> ",
-                    this.pyOptions.features.builtinGenerics
-                        ? "list"
-                        : this.withTyping("List"),
-                    "[",
-                    this.withTyping("Any"),
-                    "]",
-                ),
-                ":",
-            ],
-            () => {
-                this.emitLine(
-                    "assert isinstance(x, tuple) and len(x) == len(fs)",
-                );
-                this.emitLine("return [f(y) for (f, y) in zip(fs, x)]");
-            },
-        );
+    // `Optional[T]`, or `T | None` from 3.10.
+    private optionalType(t: Sourcelike): Sourcelike {
+        if (this.pyOptions.features.unionOperators) return [t, " | None"];
+        return [this.withTyping("Optional"), "[", t, "]"];
     }
 
     // `List[Callable[[Any], Any]]`, a converter per tuple item.
@@ -1185,34 +1213,49 @@ export class JSONPythonRenderer extends PythonRenderer {
         );
     }
 
-    // `from_tuple([from_str, from_float], x)`
+    // `from_tuple([from_str, from_float], x)`, plus `min_items=1` if the
+    // second item may be missing, and `rest=from_int` for more elements.
     private tupleDeserializer(
         value: ValueOrLambda,
         t: TupleType,
     ): ValueOrLambda {
-        const deserializers = t.items.map(
-            (item) => makeLambda(this.deserializer(identity, item)).source,
+        return this.tupleConverter(value, t, "from-tuple", (v, item) =>
+            this.deserializer(v, item),
         );
-        return compose(value, (v) => [
-            this.conv("from-tuple"),
-            "([",
-            arrayIntercalate(", ", deserializers),
-            "], ",
-            v,
-            ")",
-        ]);
     }
 
     private tupleSerializer(value: ValueOrLambda, t: TupleType): ValueOrLambda {
-        const serializers = t.items.map(
-            (item) => makeLambda(this.serializer(identity, item)).source,
+        return this.tupleConverter(value, t, "to-tuple", (v, item) =>
+            this.serializer(v, item),
         );
+    }
+
+    private tupleConverter(
+        value: ValueOrLambda,
+        t: TupleType,
+        cf: ConverterFunction,
+        converter: (value: ValueOrLambda, item: Type) => ValueOrLambda,
+    ): ValueOrLambda {
+        const items = t.items.map(
+            (item) => makeLambda(converter(identity, item)).source,
+        );
+        const shape: Sourcelike[] = [];
+        if (t.minItems < items.length) {
+            shape.push(", min_items=", t.minItems.toString());
+        }
+
+        const rest = t.rest;
+        if (rest !== undefined) {
+            shape.push(", rest=", makeLambda(converter(identity, rest)).source);
+        }
+
         return compose(value, (v) => [
-            this.conv("to-tuple"),
+            this.conv(cf),
             "([",
-            arrayIntercalate(", ", serializers),
+            arrayIntercalate(", ", items),
             "], ",
             v,
+            ...shape,
             ")",
         ]);
     }

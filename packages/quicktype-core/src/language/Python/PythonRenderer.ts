@@ -156,7 +156,10 @@ export class PythonRenderer extends ConvenienceRenderer {
     }
 
     protected withImport(module: string, name: string): Sourcelike {
-        if (this.pyOptions.features.typeHints || module !== "typing") {
+        if (
+            this.pyOptions.features.typeHints ||
+            (module !== "typing" && module !== "typing_extensions")
+        ) {
             // FIXME: This is ugly.  We should rather not generate that import in the first
             // place, but right now we just make the type source and then throw it away.  It's
             // not a performance issue, so it's fine, I just bemoan this special case, and
@@ -212,8 +215,8 @@ export class PythonRenderer extends ConvenienceRenderer {
                 return !this.declaredTypes.has(actualType);
             }
 
-            return actualType.items.some((item) =>
-                this.typeContainsForwardRef(item),
+            return Array.from(actualType.getNonAttributeChildren()).some((c) =>
+                this.typeContainsForwardRef(c),
             );
         }
 
@@ -236,8 +239,8 @@ export class PythonRenderer extends ConvenienceRenderer {
             !suppressQuotes &&
             iterableSome(nonNulls, (m) => this.typeContainsForwardRef(m));
         const quote = needsQuotes ? "'" : "";
-        const memberTypes = Array.from(nonNulls).map((m) =>
-            this.pythonType(m, false, true),
+        const memberTypes = Array.from(nonNulls).flatMap((m) =>
+            this.unionMemberTypes(m, true),
         );
 
         const union: Sourcelike[] = [
@@ -336,14 +339,14 @@ export class PythonRenderer extends ConvenienceRenderer {
                 }
 
                 const [hasNull, nonNulls] = removeNullFromUnion(unionType);
-                const memberTypes = Array.from(nonNulls).map((m) =>
-                    this.pythonType(m, false, suppressQuotes),
+                const memberTypes = Array.from(nonNulls).flatMap((m) =>
+                    this.unionMemberTypes(m, suppressQuotes),
                 );
 
                 if (hasNull !== null) {
                     const rest = this.noneDefault(_isRootTypeDef);
 
-                    if (nonNulls.size > 1) {
+                    if (memberTypes.length > 1) {
                         this.withImport("typing", "Union");
                         return [
                             this.withTyping("Optional"),
@@ -398,24 +401,76 @@ export class PythonRenderer extends ConvenienceRenderer {
         );
     }
 
-    // The tuple spelled out, `Tuple[A, B]`.
+    // The tuple spelled out, `Tuple[A, B]`.  A tuple with optional items is
+    // a union of a tuple for each length, `Union[Tuple[A], Tuple[A, B]]`,
+    // and a rest is unpacked, `Tuple[A, Unpack[Tuple[R, ...]]]`
+    // (`tuple[A, *tuple[R, ...]]` is Python 3.11).
     protected tupleTypeSource(
         t: TupleType,
         suppressQuotes = false,
     ): Sourcelike {
+        const lengths = this.tupleTypesByLength(t, suppressQuotes);
+        if (lengths.length === 1) return lengths[0];
+        if (this.pyOptions.features.unionOperators) {
+            return arrayIntercalate(" | ", lengths);
+        }
+
         return [
-            this.pyOptions.features.builtinGenerics
-                ? "tuple"
-                : this.withTyping("Tuple"),
+            this.withTyping("Union"),
             "[",
-            arrayIntercalate(
-                ", ",
-                t.items.map((item) =>
-                    this.pythonType(item, false, suppressQuotes),
-                ),
-            ),
+            arrayIntercalate(", ", lengths),
             "]",
         ];
+    }
+
+    // The types of a union member, with a tuple that has optional items
+    // spliced in as its tuples of each length.
+    private unionMemberTypes(t: Type, suppressQuotes: boolean): Sourcelike[] {
+        const actualType = followTargetType(t);
+        if (
+            actualType instanceof TupleType &&
+            !this.tupleNeedsName(actualType)
+        ) {
+            return this.tupleTypesByLength(actualType, suppressQuotes);
+        }
+
+        return [this.pythonType(t, false, suppressQuotes)];
+    }
+
+    private tupleTypesByLength(
+        t: TupleType,
+        suppressQuotes: boolean,
+    ): Sourcelike[] {
+        const tuple = this.pyOptions.features.builtinGenerics
+            ? "tuple"
+            : this.withTyping("Tuple");
+        const items = t.items.map((item) =>
+            this.pythonType(item, false, suppressQuotes),
+        );
+        const rest = t.rest;
+        const result: Sourcelike[] = [];
+        for (let length = t.minItems; length <= items.length; length++) {
+            const elements = items.slice(0, length);
+            if (rest !== undefined && length === items.length) {
+                elements.push([
+                    this.withImport("typing_extensions", "Unpack"),
+                    "[",
+                    tuple,
+                    "[",
+                    this.pythonType(rest, false, suppressQuotes),
+                    ", ...]]",
+                ]);
+            }
+
+            result.push([
+                tuple,
+                "[",
+                elements.length === 0 ? "()" : arrayIntercalate(", ", elements),
+                "]",
+            ]);
+        }
+
+        return result;
     }
 
     protected declarationLine(t: Type): Sourcelike {

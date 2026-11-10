@@ -89,7 +89,7 @@ describe("types", () => {
         expect(output).toContain("    one: tuple[str]");
     });
 
-    test("rest elements become an array", async () => {
+    test("rest elements are unpacked", async () => {
         const output = await renderSchema(
             {
                 type: "array",
@@ -98,7 +98,9 @@ describe("types", () => {
             },
             { "just-types": true },
         );
-        expect(output).not.toContain("tuple[");
+        expect(output).toContain(
+            "TopLevel = tuple[bool, Unpack[tuple[int, ...]]]",
+        );
     });
 
     test("a property named tuple doesn't shadow the builtin", async () => {
@@ -123,16 +125,24 @@ describe("converters", () => {
         );
         expect(output).toContain(
             [
-                "def from_tuple(fs: list[Callable[[Any], Any]], x: Any) -> tuple[Any, ...]:",
-                "    assert isinstance(x, list) and len(x) == len(fs)",
-                "    return tuple(f(y) for (f, y) in zip(fs, x))",
+                "def from_tuple(fs: list[Callable[[Any], Any]], x: Any, min_items: int | None = None, rest: Callable[[Any], Any] | None = None) -> tuple[Any, ...]:",
+                "    assert isinstance(x, list) and (len(fs) if min_items is None else min_items) <= len(x)",
+                "    assert len(x) <= len(fs) or rest is not None",
+                "    result = [f(y) for (f, y) in zip(fs, x)]",
+                "    if rest is not None:",
+                "        result += [rest(y) for y in x[len(fs):]]",
+                "    return tuple(result)",
             ].join("\n"),
         );
         expect(output).toContain(
             [
-                "def to_tuple(fs: list[Callable[[Any], Any]], x: Any) -> list[Any]:",
-                "    assert isinstance(x, tuple) and len(x) == len(fs)",
-                "    return [f(y) for (f, y) in zip(fs, x)]",
+                "def to_tuple(fs: list[Callable[[Any], Any]], x: Any, min_items: int | None = None, rest: Callable[[Any], Any] | None = None) -> list[Any]:",
+                "    assert isinstance(x, tuple) and (len(fs) if min_items is None else min_items) <= len(x)",
+                "    assert len(x) <= len(fs) or rest is not None",
+                "    result = [f(y) for (f, y) in zip(fs, x)]",
+                "    if rest is not None:",
+                "        result += [rest(y) for y in x[len(fs):]]",
+                "    return result",
             ].join("\n"),
         );
     });
@@ -142,7 +152,7 @@ describe("converters", () => {
             "python-version": "3.7",
         });
         expect(output).toContain(
-            "def from_tuple(fs: List[Callable[[Any], Any]], x: Any) -> Tuple[Any, ...]:",
+            "def from_tuple(fs: List[Callable[[Any], Any]], x: Any, min_items: Optional[int] = None, rest: Optional[Callable[[Any], Any]] = None) -> Tuple[Any, ...]:",
         );
     });
 
@@ -150,7 +160,9 @@ describe("converters", () => {
         const output = await renderSchema(withPair, {
             "python-version": "3.5",
         });
-        expect(output).toContain("def from_tuple(fs, x):");
+        expect(output).toContain(
+            "def from_tuple(fs, x, min_items=None, rest=None):",
+        );
         expect(output).toContain(
             'pair = from_tuple([from_str, from_float], obj["pair"])',
         );
