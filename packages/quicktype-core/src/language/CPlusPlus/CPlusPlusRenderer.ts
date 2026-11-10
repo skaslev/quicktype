@@ -28,7 +28,7 @@ import {
     type Namer,
     funPrefixNamer,
 } from "../../Naming.js";
-import type { RenderContext } from "../../Renderer.js";
+import type { BlankLineConfig, RenderContext } from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import {
@@ -51,6 +51,7 @@ import {
     EnumType,
     isPrimitiveStringTypeKind,
     MapType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -296,6 +297,57 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         );
     }
 
+    private isRecursiveTuple(t: TupleType): boolean {
+        return iterableSome(t.getChildren(), (child) =>
+            this.typeReaches(child, t),
+        );
+    }
+
+    // Tuples are spelled out as std::tuple<A, B>, unless the schema names
+    // them or they contain themselves.  Named tuples are type aliases, or
+    // structs deriving from std::tuple if they contain themselves: an alias
+    // can't refer to itself.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "enum"].includes(c.kind) &&
+                    !(c instanceof UnionType && this.unionNeedsName(c)) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
+    }
+
+    private isTupleStruct(t: Type): t is TupleType {
+        return (
+            t instanceof TupleType &&
+            this.tupleNeedsName(t) &&
+            this.isRecursiveTuple(t)
+        );
+    }
+
+    private forEachTupleStruct(
+        blankLocations: BlankLineConfig,
+        f: (t: TupleType, name: Name) => void,
+    ): void {
+        const tuples: Array<[TupleType, TupleType]> = [];
+        this.forEachDeclaration("none", (decl) => {
+            if (decl.kind === "define" && this.isTupleStruct(decl.type)) {
+                tuples.push([decl.type, decl.type]);
+            }
+        });
+        this.forEachSpecificNamedType(blankLocations, tuples, f);
+    }
+
+    private get haveTuples(): boolean {
+        return iterableSome(
+            this.typeGraph.allTypesUnordered(),
+            (t) => t instanceof TupleType,
+        );
+    }
+
     public isImplicitCycleBreaker(t: Type): boolean {
         // Containers break completeness cycles for classes, but not for type
         // aliases: an alias name is not in scope on its own right-hand side.
@@ -308,7 +360,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     }
 
     protected canBreakCycles(t: Type): boolean {
-        return t instanceof ClassType || t instanceof UnionType;
+        return (
+            t instanceof ClassType ||
+            t instanceof UnionType ||
+            this.isTupleStruct(t)
+        );
     }
 
     // Is likely to return std::optional or boost::optional
@@ -641,6 +697,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             }
         }
 
+        if (this.haveTuples) {
+            this.emitInclude(true, "tuple");
+        }
+
         if (justTypesIncludes !== undefined) {
             for (const header of justTypesIncludes.headers) {
                 this.emitInclude(true, header);
@@ -743,7 +803,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
     protected canBeForwardDeclared(t: Type): boolean {
         const kind = t.kind;
-        return kind === "class";
+        return kind === "class" || this.isTupleStruct(t);
     }
 
     protected get commentLinesSpliceOnBackslash(): boolean {
@@ -1009,9 +1069,61 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
                 return this._stringType.getType();
             },
+            (tupleType) => {
+                // With wide strings, the JSON side of a conversion is the
+                // tuple with narrow strings, which has no name.
+                if (
+                    !this.tupleNeedsName(tupleType) ||
+                    (forceNarrowString &&
+                        this._stringType !== this.NarrowString &&
+                        !this.isTupleStruct(tupleType))
+                ) {
+                    return this.cppTupleType(
+                        tupleType,
+                        inJsonNamespace,
+                        withIssues,
+                        forceNarrowString,
+                    );
+                }
+
+                return this.variantIndirection(
+                    tupleType,
+                    ctx.needsForwardIndirection &&
+                        this.isForwardDeclaredType(tupleType) &&
+                        !isOptional,
+                    [
+                        this.ourQualifier(inJsonNamespace),
+                        this.nameForNamedType(tupleType),
+                    ],
+                );
+            },
         );
         if (!isOptional) return typeSource;
         return [this.optionalType(t), "<", typeSource, ">"];
+    }
+
+    // The elements of a std::tuple must be complete types, like the members
+    // of a class.
+    protected cppTupleType(
+        t: TupleType,
+        inJsonNamespace: boolean,
+        withIssues: boolean,
+        forceNarrowString: boolean,
+    ): Sourcelike {
+        const items = t.items.map((item) =>
+            this.cppType(
+                item,
+                {
+                    needsForwardIndirection: true,
+                    needsOptionalIndirection: true,
+                    inJsonNamespace,
+                },
+                withIssues,
+                forceNarrowString,
+                false,
+            ),
+        );
+        return ["std::tuple<", arrayIntercalate(", ", items), ">"];
     }
 
     /**
@@ -1046,6 +1158,21 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 });
             } else if (t instanceof MapType) {
                 recur(true, isVariant, l + 1, t.values);
+            } else if (t instanceof TupleType) {
+                if (this.tupleNeedsName(t)) {
+                    result.push({
+                        name: this.nameForNamedType(t),
+                        type: t,
+                        level: l,
+                        variant: isVariant,
+                        forceInclude: true,
+                    });
+                } else {
+                    // The elements of a std::tuple must be complete types.
+                    for (const item of t.items) {
+                        recur(true, isVariant, l + 1, item);
+                    }
+                }
             } else if (t instanceof EnumType) {
                 result.push({
                     name: this.nameForNamedType(t),
@@ -2099,6 +2226,88 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         );
     }
 
+    protected emitTupleTypedef(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        const tupleType = this.cppTupleType(t, false, true, false);
+        if (!this.isRecursiveTuple(t)) {
+            this.emitLine("using ", tupleName, " = ", tupleType, ";");
+            return;
+        }
+
+        // As for recursive unions, a struct introduces its name before the
+        // base type is parsed.
+        this.emitBlock(["struct ", tupleName, " : ", tupleType], true, () => {
+            this.emitLine("using base = ", tupleType, ";");
+            this.emitLine("using base::base;");
+            this.emitLine("using base::operator=;");
+        });
+    }
+
+    protected emitTupleStructHeaders(tupleName: Name): void {
+        this.emitLine(
+            "void from_json(",
+            this.withConst("json"),
+            " & j, ",
+            tupleName,
+            " & x);",
+        );
+        this.emitLine(
+            "void to_json(json & j, ",
+            this.withConst(tupleName),
+            " & x);",
+        );
+    }
+
+    protected emitTupleStructFunctions(t: TupleType, tupleName: Name): void {
+        const base: Sourcelike = [tupleName, "::base"];
+        // With wide strings, the JSON side is the tuple with narrow strings.
+        const narrow = this.cppTupleType(t, false, false, true);
+        const jsonBase =
+            this.sourcelikeToString(narrow) ===
+            this.sourcelikeToString(this.cppTupleType(t, false, false, false))
+                ? base
+                : narrow;
+        this.emitBlock(
+            [
+                "inline void from_json(",
+                this.withConst("json"),
+                " & j, ",
+                tupleName,
+                " & x)",
+            ],
+            false,
+            () =>
+                this.emitLine(
+                    "x = ",
+                    this._stringType.wrapEncodingChange([], jsonBase, base, [
+                        "j.get<",
+                        jsonBase,
+                        ">()",
+                    ]),
+                    ";",
+                ),
+        );
+        this.ensureBlankLine();
+        this.emitBlock(
+            [
+                "inline void to_json(json & j, ",
+                this.withConst(tupleName),
+                " & x)",
+            ],
+            false,
+            () =>
+                this.emitLine(
+                    "j = ",
+                    this._stringType.wrapEncodingChange([], base, jsonBase, [
+                        "static_cast<",
+                        this.withConst(base),
+                        " &>(x)",
+                    ]),
+                    ";",
+                ),
+        );
+    }
+
     protected emitUnionHeaders(u: UnionType): void {
         // Forward declarations for boost::variant<Ts...>. If none of the Ts were defined by us (e.g. if we have
         // boost::variant<int32_t, std::string>) then we need to specialize nlohmann::adl_serializer for our
@@ -2180,53 +2389,99 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             ],
             false,
             () => {
-                let onFirst = true;
+                const emitAssignment = (t: Type): void => {
+                    const cppType = this.cppType(
+                        t,
+                        {
+                            needsForwardIndirection: true,
+                            needsOptionalIndirection: true,
+                            inJsonNamespace: true,
+                        },
+                        false,
+                        true,
+                        false,
+                    );
+                    const toType = this.cppType(
+                        t,
+                        {
+                            needsForwardIndirection: true,
+                            needsOptionalIndirection: true,
+                            inJsonNamespace: true,
+                        },
+                        false,
+                        false,
+                        false,
+                    );
+                    this.emitLine(
+                        "x = ",
+                        this._stringType.wrapEncodingChange(
+                            [ourQualifier],
+                            cppType,
+                            toType,
+                            ["j.get<", cppType, ">()"],
+                        ),
+                        ";",
+                    );
+                };
+
+                // Tuples are arrays, too.  The tuples of a union differ in
+                // length, but an array of a tuple's length may be the
+                // union's array instead, so then the tuples are tried first.
+                const tupleCases: Array<[Type, Sourcelike]> = [];
+                for (const t of nonNulls) {
+                    if (!(t instanceof TupleType)) continue;
+                    tupleCases.push([
+                        t,
+                        [
+                            "j.is_array() && j.size() == ",
+                            t.items.length.toString(),
+                        ],
+                    ]);
+                }
+
+                const tryTuples =
+                    tupleCases.length > 0 &&
+                    iterableSome(nonNulls, (t) => t instanceof ArrayType);
+                if (tryTuples) {
+                    for (const [t, condition] of tupleCases) {
+                        this.emitBlock(["if (", condition, ")"], false, () => {
+                            this.emitLine("try {");
+                            this.indent(() => {
+                                emitAssignment(t);
+                                this.emitLine("return;");
+                            });
+                            this.emitLine(
+                                "} catch (",
+                                this.withConst("std::exception"),
+                                " &) {}",
+                            );
+                        });
+                    }
+                }
+
+                const cases: Array<[Type, Sourcelike]> = [];
                 for (const [kind, func] of functionForKind) {
+                    if (kind === "array" && !tryTuples) {
+                        cases.push(...tupleCases);
+                    }
+
                     const typeForKind = iterableFind(
                         nonNulls,
                         (t) => t.kind === kind,
                     );
                     if (typeForKind === undefined) continue;
+                    cases.push([typeForKind, ["j.", func, "()"]]);
+                }
+
+                let onFirst = true;
+                for (const [typeForKind, condition] of cases) {
                     this.emitLine(
                         onFirst ? "if" : "else if",
-                        " (j.",
-                        func,
-                        "())",
+                        " (",
+                        condition,
+                        ")",
                     );
-                    this.indent(() => {
-                        const cppType = this.cppType(
-                            typeForKind,
-                            {
-                                needsForwardIndirection: true,
-                                needsOptionalIndirection: true,
-                                inJsonNamespace: true,
-                            },
-                            false,
-                            true,
-                            false,
-                        );
-                        const toType = this.cppType(
-                            typeForKind,
-                            {
-                                needsForwardIndirection: true,
-                                needsOptionalIndirection: true,
-                                inJsonNamespace: true,
-                            },
-                            false,
-                            false,
-                            false,
-                        );
-                        this.emitLine(
-                            "x = ",
-                            this._stringType.wrapEncodingChange(
-                                [ourQualifier],
-                                cppType,
-                                toType,
-                                ["j.get<", cppType, ">()"],
-                            ),
-                            ";",
-                        );
-                    });
+                    this.indent(() => emitAssignment(typeForKind));
                     onFirst = false;
                 }
 
@@ -2595,7 +2850,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
     protected emitDeclaration(decl: Declaration): void {
         if (decl.kind === "forward") {
-            if (this._options.codeFormat) {
+            if (this._options.codeFormat && !(decl.type instanceof TupleType)) {
                 this.emitLine("class ", this.nameForNamedType(decl.type), ";");
             } else {
                 this.emitLine("struct ", this.nameForNamedType(decl.type), ";");
@@ -2609,6 +2864,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 this.emitEnum(type, name);
             } else if (type instanceof UnionType) {
                 this.emitUnionTypedefs(type, name);
+            } else if (type instanceof TupleType) {
+                this.emitTupleTypedef(type, name);
             } else {
                 panic(`Cannot declare type ${type.kind}`);
             }
@@ -3358,6 +3615,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 (u: UnionType, unionName: Name) =>
                     this.emitUnionWrapperHeaders(u, unionName),
             );
+
+            this.forEachTupleStruct("leading-and-interposing", (_, name) =>
+                this.emitTupleStructHeaders(name),
+            );
         });
     }
 
@@ -3392,6 +3653,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             "leading-and-interposing",
             (u: UnionType, unionName: Name) =>
                 this.emitUnionWrapperFunctions(u, unionName),
+        );
+
+        this.forEachTupleStruct("leading-and-interposing", (t, name) =>
+            this.emitTupleStructFunctions(t, name),
         );
     }
 
@@ -3528,6 +3793,9 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 } else {
                     propRecord.kind = IncludeKind.ForwardDeclare;
                 }
+            } else if (t.type instanceof TupleType) {
+                propRecord.typeKind = "tuple";
+                propRecord.kind = IncludeKind.Include;
             }
 
             if (includes.has(typeName)) {
@@ -3549,7 +3817,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     }
 
     protected emitIncludes(
-        c: ClassType | UnionType | EnumType,
+        c: ClassType | UnionType | EnumType | TupleType,
         defName: string,
     ): void {
         /**
@@ -3572,6 +3840,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                         { kind: IncludeKind.Include, typeKind: "class" },
                     );
                 }
+            }
+        } else if (c instanceof TupleType) {
+            for (const item of c.items) {
+                this.updateIncludes(true, includes, item, c);
             }
         } else if (c instanceof ClassType) {
             this.forEachClassProperty(
@@ -3647,7 +3919,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     }
 
     protected emitDefinition(
-        d: ClassType | EnumType | UnionType,
+        d: ClassType | EnumType | UnionType | TupleType,
         defName: Name,
     ): void {
         const name = `${this.sourcelikeToString(defName)}.hpp`;
@@ -3671,6 +3943,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 this.emitEnum(d, defName);
             } else if (d instanceof UnionType) {
                 this.emitUnionTypedefs(d, defName);
+            } else if (d instanceof TupleType) {
+                this.emitTupleTypedef(d, defName);
             }
         });
 
@@ -3704,6 +3978,9 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             },
             (u, n) => {
                 this.emitDefinition(u, n);
+            },
+            (t, n) => {
+                this.emitDefinition(t, n);
             },
         );
 
@@ -3744,10 +4021,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 decl.type,
                 (t) => {
                     if (
-                        isNamedType(t) &&
-                        (t instanceof ClassType ||
-                            t instanceof EnumType ||
-                            t instanceof UnionType)
+                        (isNamedType(t) &&
+                            (t instanceof ClassType ||
+                                t instanceof EnumType ||
+                                t instanceof UnionType)) ||
+                        (t instanceof TupleType && this.tupleNeedsName(t))
                     ) {
                         return new Set([
                             this.sourcelikeToString(
@@ -3979,6 +4257,24 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     },
                 );
                 this.superThis.ensureBlankLine();
+
+                if (this.superThis.haveTuples) {
+                    this.superThis.emitLine(
+                        "template<typename... TF, typename... TT>",
+                    );
+                    this.superThis.emitBlock(
+                        [
+                            "static toType convert(tag<std::tuple<TF...> >, tag<std::tuple<TT...> >, fromType t)",
+                        ],
+                        false,
+                        () => {
+                            this.superThis.emitLine(
+                                "return std::apply([](TF... e) { return toType(Utf16_Utf8<TF, TT>::convert(e)...); }, t);",
+                            );
+                        },
+                    );
+                    this.superThis.ensureBlankLine();
+                }
 
                 this.superThis.emitLine("template<typename TF, typename TT>");
                 this.superThis.emitBlock(

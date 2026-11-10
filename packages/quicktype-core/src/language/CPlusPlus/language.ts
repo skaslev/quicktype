@@ -6,6 +6,7 @@ import {
     getOptionValues,
 } from "../../RendererOptions/index.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
@@ -137,6 +138,12 @@ export class CPlusPlusTargetLanguage extends TargetLanguage<
 
     public get supportsOptionalClassProperties(): boolean {
         return true;
+    }
+
+    // nlohmann/json converts std::tuple to and from JSON arrays, one element
+    // per item.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
     }
 
     public get stringTypeMapping(): StringTypeMapping {
