@@ -214,6 +214,24 @@ export class Scala3Renderer extends ConvenienceRenderer {
         this.ensureBlankLine();
         this.emitLine("package ", this._scalaOptions.packageName);
         this.ensureBlankLine();
+
+        // Unions with null and two or more other members refer to NullValue.
+        // The Circe and uPickle renderers declare it with their support code;
+        // just-types output has to declare it itself.
+        if (this._scalaOptions.justTypes && this.haveUnionsWithNull()) {
+            this.emitLine("type NullValue = None.type");
+            this.ensureBlankLine();
+        }
+    }
+
+    private haveUnionsWithNull(): boolean {
+        for (const t of this.typeGraph.allTypesUnordered()) {
+            if (t.kind !== "union") continue;
+            const [maybeNull, nonNulls] = removeNullFromUnion(t as UnionType);
+            if (maybeNull !== null && nonNulls.size > 1) return true;
+        }
+
+        return false;
     }
 
     protected emitTopLevelArray(t: ArrayType, name: Name): void {
@@ -370,7 +388,11 @@ export class Scala3Renderer extends ConvenienceRenderer {
                 this.emitTopLevelArray(t, name);
             } else if (t instanceof MapType) {
                 this.emitTopLevelMap(t, name);
-            } else if (t.isPrimitive()) {
+            } else if (
+                t.isPrimitive() ||
+                this.namedTypeToNameForTopLevel(t) === undefined
+            ) {
+                // Primitives and other unnamed top-levels, e.g. `T | null`
                 this.emitLine(["type ", name, " = ", this.scalaType(t)]);
             }
         });
