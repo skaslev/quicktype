@@ -38,6 +38,7 @@ import {
 } from "./Transformers.js";
 import {
     ArrayType,
+    ClassType,
     EnumType,
     type PrimitiveStringTypeKind,
     type PrimitiveType,
@@ -139,7 +140,8 @@ function replaceUnion(
     }
 
     // Keyed by member, not by kind: tuples of different shapes are
-    // different members of the same kind.
+    // different members of the same kind, and a union can keep several
+    // classes apart.
     const reconstitutedMembers = mapMap(union.members.entries(), (m) =>
         reconstituteMember(m),
     );
@@ -277,7 +279,23 @@ function replaceUnion(
         );
     }
 
-    const transformerForClass = transformerForKind("class");
+    // A JSON object is the map or one of the classes.  A union only has
+    // several classes if it keeps them apart, see `distinctObjectGroups`,
+    // and then they're tried in turn.
+    const classMembers = Array.from(union.members).filter(
+        (m) => m instanceof ClassType,
+    );
+    let transformerForClass: Transformer | undefined;
+    if (classMembers.length === 1) {
+        transformerForClass = transformerForMember(classMembers[0]);
+    } else if (classMembers.length > 1) {
+        transformerForClass = new ChoiceTransformer(
+            graph,
+            builder.getPrimitiveType("any"),
+            classMembers.map(transformerForMember),
+        );
+    }
+
     const transformerForMap = transformerForKind("map");
     assert(
         transformerForClass === undefined || transformerForMap === undefined,
