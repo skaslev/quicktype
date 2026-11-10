@@ -24,10 +24,11 @@ import {
     type ClassType,
     EnumType,
     type Type,
-    type UnionType,
+    UnionType,
 } from "../../Type/index.js";
 import {
     directlyReachableSingleNamedType,
+    isNamedType,
     matchType,
     nullableFromUnion,
 } from "../../Type/TypeUtils.js";
@@ -111,6 +112,16 @@ export class DartRenderer extends ConvenienceRenderer {
     }
 
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        if (this._options.justTypes) {
+            // Only classes and enums are declared under the top-level name;
+            // everything else (including unions, which Dart doesn't render)
+            // gets a typedef, so e.g. a nullable class top-level becomes
+            // `typedef TopLevel = Class?;` rather than naming the class.
+            return isNamedType(type) && !(type instanceof UnionType)
+                ? type
+                : undefined;
+        }
+
         // If the top-level type doesn't contain any classes or unions
         // we have to define a class just for the `FromJson` method, in
         // emitFromJsonForTopLevel.
@@ -1073,6 +1084,14 @@ export class DartRenderer extends ConvenienceRenderer {
         if (!this._options.justTypes && !this._options.codersInClass) {
             this._emitTopLvlEncoderDecoder();
         }
+
+        // Aliases for top-levels whose name isn't taken by a class or enum.
+        this.forEachTopLevel(
+            "leading-and-interposing",
+            (t, name) =>
+                this.emitLine("typedef ", name, " = ", this.dartType(t), ";"),
+            (t) => this.namedTypeToNameForTopLevel(t) === undefined,
+        );
 
         this.forEachNamedType(
             "leading-and-interposing",
