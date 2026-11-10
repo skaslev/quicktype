@@ -37,6 +37,31 @@ const pair = {
 };
 
 describe("targets without tuples", () => {
+    // The tuple's array of the union of its items would contain itself
+    // through arrays and unions only, which these renderers can't declare.
+    test.each([
+        ["cplusplus", "std::vector<nlohmann::json>"],
+        ["python", "list[Any]"],
+        ["java", "List<Object>"],
+    ] as const)("%s: a tuple's reference to itself becomes any", async (lang, expected) => {
+        const output = await renderSchema(lang, {
+            type: "object",
+            properties: { node: { $ref: "#/$defs/node" } },
+            required: ["node"],
+            additionalProperties: false,
+            $defs: {
+                node: {
+                    type: "array",
+                    items: [
+                        { type: "string" },
+                        { type: "array", items: { $ref: "#/$defs/node" } },
+                    ],
+                },
+            },
+        });
+        expect(output).toContain(expected);
+    });
+
     test("get an array of the union of the item types", async () => {
         const output = await renderSchema("go", pair, justTypes);
         expect(output).toContain("type TopLevel []TopLevelElement");

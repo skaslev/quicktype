@@ -808,6 +808,10 @@ async function addTypesInSchema(
 ): Promise<void> {
     const typeForCanonicalRef = new EqualityMap<Ref, TypeRef>();
 
+    // The tuples being converted that become arrays of the union of their
+    // item types, see `makeArrayType`.
+    const tuplesBeingLowered: Ref[] = [];
+
     function setTypeForLocation(loc: Location, t: TypeRef): void {
         const maybeRef = typeForCanonicalRef.get(loc.canonicalRef);
         if (maybeRef !== undefined) {
@@ -1095,18 +1099,6 @@ async function addTypesInSchema(
                 : "items";
             let itemType: TypeRef;
             if (Array.isArray(tupleItems)) {
-                const itemsLoc = loc.push(tupleKey);
-                const itemTypes = await arrayMapSync(
-                    tupleItems,
-                    async (item, i) => {
-                        const itemLoc = itemsLoc.push(i.toString());
-                        return await toType(
-                            checkJSONSchema(item, itemLoc.canonicalRef),
-                            itemLoc,
-                            singularAttributes,
-                        );
-                    },
-                );
                 // The rest elements of an open tuple are described by an
                 // object-form `items` next to `prefixItems` (2020-12), or
                 // by `additionalItems` next to an array-form `items`
@@ -1117,35 +1109,23 @@ async function addTypesInSchema(
                     tupleKey === "prefixItems" ? "items" : "additionalItems";
                 const restSchema =
                     tupleKey === "prefixItems" ? items : schema.additionalItems;
-                let restType: TypeRef | undefined;
-                if (
+                const hasRestSchema =
                     typeof restSchema === "object" &&
                     restSchema !== null &&
-                    !Array.isArray(restSchema)
-                ) {
-                    const restItemsLoc = loc.push(restKey);
-                    restType = await toType(
-                        checkJSONSchema(restSchema, restItemsLoc.canonicalRef),
-                        restItemsLoc,
-                        singularAttributes,
-                    );
-                }
+                    !Array.isArray(restSchema);
 
                 // A rest that `maxItems` limits to a few elements is just
                 // as many optional items, e.g. `[A, B, C?]`.
-                const positionalItems = itemTypes.length;
                 const maxItems = schema.maxItems;
-                if (
-                    restType !== undefined &&
+                const restIsBounded =
+                    hasRestSchema &&
                     typeof maxItems === "number" &&
-                    maxItems - itemTypes.length <= maxOptionalTupleItems
-                ) {
-                    for (let i = itemTypes.length; i < maxItems; i++) {
-                        itemTypes.push(restType);
-                    }
-
-                    restType = undefined;
-                }
+                    maxItems - tupleItems.length <= maxOptionalTupleItems;
+                const itemCount =
+                    tupleItems.length +
+                    (restIsBounded
+                        ? Math.max(0, Number(maxItems) - tupleItems.length)
+                        : 0);
 
                 // Without `minItems` every positional item is taken to be
                 // present, which is what tuple schemas usually mean; the
@@ -1154,19 +1134,61 @@ async function addTypesInSchema(
                     typeof schema.minItems === "number"
                         ? Math.max(
                               0,
-                              Math.min(
-                                  itemTypes.length,
-                                  Math.floor(schema.minItems),
-                              ),
+                              Math.min(itemCount, Math.floor(schema.minItems)),
                           )
-                        : positionalItems;
+                        : tupleItems.length;
                 const isFixedLength =
-                    minItems === itemTypes.length && restType === undefined;
-                if (
-                    itemTypes.length > 0 &&
+                    minItems === itemCount &&
+                    !(hasRestSchema && !restIsBounded);
+                const keepTuple =
+                    itemCount > 0 &&
                     (typeBuilder.tupleSupport === "full" ||
-                        (typeBuilder.tupleSupport === "fixed" && isFixedLength))
-                ) {
+                        (typeBuilder.tupleSupport === "fixed" &&
+                            isFixedLength));
+
+                // While a tuple that becomes an array is converted, a
+                // reference to it from its own items becomes `any`, see
+                // `toType`.
+                if (!keepTuple) tuplesBeingLowered.push(loc.canonicalRef);
+                const itemsLoc = loc.push(tupleKey);
+                let itemTypes: TypeRef[];
+                let restType: TypeRef | undefined;
+                try {
+                    itemTypes = await arrayMapSync(
+                        tupleItems,
+                        async (item, i) => {
+                            const itemLoc = itemsLoc.push(i.toString());
+                            return await toType(
+                                checkJSONSchema(item, itemLoc.canonicalRef),
+                                itemLoc,
+                                singularAttributes,
+                            );
+                        },
+                    );
+                    if (hasRestSchema) {
+                        const restItemsLoc = loc.push(restKey);
+                        restType = await toType(
+                            checkJSONSchema(
+                                restSchema,
+                                restItemsLoc.canonicalRef,
+                            ),
+                            restItemsLoc,
+                            singularAttributes,
+                        );
+                    }
+                } finally {
+                    if (!keepTuple) tuplesBeingLowered.pop();
+                }
+
+                if (restType !== undefined && restIsBounded) {
+                    for (let i = itemTypes.length; i < itemCount; i++) {
+                        itemTypes.push(restType);
+                    }
+
+                    restType = undefined;
+                }
+
+                if (keepTuple) {
                     // A tuple whose schema names it (`title`, or as a
                     // definition) keeps that name as given.  It would
                     // otherwise only reach the tuple through the unions
@@ -1543,6 +1565,14 @@ async function addTypesInSchema(
         loc: Location,
         typeAttributes: TypeAttributes,
     ): Promise<TypeRef> {
+        // A tuple the target can't express becomes an array of the union of
+        // its item types.  If an item refers to the tuple itself, that union
+        // would contain itself through arrays and unions only, which most
+        // renderers can't declare, so the reference becomes `any`.
+        if (tuplesBeingLowered.some((r) => r.equals(loc.canonicalRef))) {
+            return typeBuilder.getPrimitiveType("any");
+        }
+
         const maybeType = typeForCanonicalRef.get(loc.canonicalRef);
         if (maybeType !== undefined) {
             return maybeType;
