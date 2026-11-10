@@ -1,10 +1,17 @@
 import {
+    mapFilter,
     mapMap,
     mapMerge,
     mapUpdateInto,
     setUnionInto,
 } from "collection-utils";
 
+import { descriptionTypeAttributeKind } from "./attributes/Description.js";
+import {
+    distinctArrayGroups,
+    distinctArrayTypeAttributeKind,
+    isDistinctArray,
+} from "./attributes/DistinctArrays.js";
 import {
     distinctObjectGroups,
     distinctObjectTypeAttributeKind,
@@ -24,6 +31,7 @@ import {
 } from "./attributes/TypeAttributes.js";
 import { assert, assertNever, defined, panic } from "./support/Support.js";
 import {
+    type ArrayType,
     type PrimitiveStringTypeKind,
     type PrimitiveTypeKind,
     type TupleType,
@@ -51,6 +59,14 @@ export interface UnionTypeProvider<TArrayData, TObjectData> {
     readonly tupleData: readonly TupleType[];
     /** The attributes for each of `tupleData`, if known. */
     readonly tupleAttributes?: readonly TypeAttributes[];
+
+    /**
+     * The array members and their attributes, if the union keeps several
+     * apart, see `distinctArrayGroups`.  Otherwise the union has at most one
+     * array member, made from `arrayData`.
+     */
+    readonly arrayGroups?: ReadonlyArray<readonly [TArrayData, TypeAttributes]>;
+
     readonly enumCases: ReadonlySet<string>;
 
     getMemberKinds: () => TypeAttributeMap<TypeKind>;
@@ -171,6 +187,8 @@ export class UnionAccumulator<TArray, TObject>
     public readonly tupleData: TupleType[] = [];
 
     public readonly tupleAttributes: TypeAttributes[] = [];
+    // The attributes of each of `arrayData`.
+    protected readonly arrayAttributes: TypeAttributes[] = [];
 
     public readonly objectData: TObject[] = [];
 
@@ -279,6 +297,7 @@ export class UnionAccumulator<TArray, TObject>
 
     public addArray(t: TArray, attributes: TypeAttributes): void {
         this.arrayData.push(t);
+        this.arrayAttributes.push(attributes);
         addAttributesToBuilder(
             this._nonStringTypeAttributes,
             "array",
@@ -429,7 +448,42 @@ export class UnionAccumulator<TArray, TObject>
             );
         }
 
+        // Neither do array types unified with one that isn't a distinct
+        // array type.
+        const arrayAttributes = merged.get("array");
+        if (
+            arrayAttributes !== undefined &&
+            isDistinctArray(arrayAttributes) &&
+            !this.arrayAttributes.every(isDistinctArray)
+        ) {
+            merged.set(
+                "array",
+                distinctArrayTypeAttributeKind.removeInAttributes(
+                    arrayAttributes,
+                ),
+            );
+        }
+
         return merged;
+    }
+
+    /**
+     * The groups of `arrayData`, by index, that the union keeps apart, if
+     * it keeps any apart, see `distinctArrayGroups`.  That takes the item
+     * types, which only an accumulator of types knows.
+     */
+    protected get arrayIndexGroups(): number[][] | undefined {
+        return undefined;
+    }
+
+    public get arrayGroups(): Array<[TArray[], TypeAttributes]> | undefined {
+        const groups = this.arrayIndexGroups;
+        if (groups === undefined) return undefined;
+
+        return groups.map((group) => [
+            group.map((i) => this.arrayData[i]),
+            unionTypeAttributes(group.map((i) => this.arrayAttributes[i])),
+        ]);
     }
 
     public get objectGroups(): Array<[TObject[], TypeAttributes]> | undefined {
@@ -542,6 +596,13 @@ export class TypeRefUnionAccumulator extends UnionAccumulator<
     TypeRef,
     TypeRef
 > {
+    // The array types of `arrayData`.
+    private readonly _arrayTypes: ArrayType[] = [];
+
+    protected get arrayIndexGroups(): number[][] | undefined {
+        return distinctArrayGroups(this._arrayTypes, this.arrayAttributes);
+    }
+
     // There is a method analogous to this in the IntersectionAccumulator.  It might
     // make sense to find a common interface.
     private addType(t: Type, attributes: TypeAttributes): void {
@@ -554,7 +615,10 @@ export class TypeRefUnionAccumulator extends UnionAccumulator<
             (_integerType) => this.addPrimitive("integer", attributes),
             (_doubleType) => this.addPrimitive("double", attributes),
             (_stringType) => this.addStringType("string", attributes),
-            (arrayType) => this.addArray(arrayType.items.typeRef, attributes),
+            (arrayType) => {
+                this._arrayTypes.push(arrayType);
+                this.addArray(arrayType.items.typeRef, attributes);
+            },
             (classType) => this.addObject(classType.typeRef, attributes),
             (mapType) => this.addObject(mapType.typeRef, attributes),
             (objectType) => this.addObject(objectType.typeRef, attributes),
@@ -681,6 +745,9 @@ export abstract class UnionBuilder<
         forwardingRef?: TypeRef,
     ): TypeRef {
         const kinds = typeProvider.getMemberKinds();
+        const arrayGroups = kinds.has("array")
+            ? typeProvider.arrayGroups
+            : undefined;
         const objectGroups = kinds.has("object")
             ? typeProvider.objectGroups
             : undefined;
@@ -699,6 +766,7 @@ export abstract class UnionBuilder<
         if (
             kinds.size === 1 &&
             tupleGroups.length <= 1 &&
+            arrayGroups === undefined &&
             objectGroups === undefined
         ) {
             const [[kind, memberAttributes]] = Array.from(kinds);
@@ -714,6 +782,21 @@ export abstract class UnionBuilder<
                 forwardingRef,
             );
             return t;
+        }
+
+        // An array type has no declaration to show its description on, so
+        // a union of only arrays it keeps apart takes their descriptions, as
+        // the one array unifying them would.
+        if (arrayGroups !== undefined && kinds.size === 1) {
+            typeAttributes = combineTypeAttributes("union", [
+                typeAttributes,
+                ...arrayGroups.map(([, attributes]) =>
+                    mapFilter(
+                        attributes,
+                        (_, kind) => kind === descriptionTypeAttributeKind,
+                    ),
+                ),
+            ]);
         }
 
         const union = unique
@@ -748,6 +831,18 @@ export abstract class UnionBuilder<
                             attributes,
                             undefined,
                         ),
+                    );
+                }
+
+                continue;
+            }
+
+            if (kind === "array" && arrayGroups !== undefined) {
+                // Each array member keeps the attributes of its own array
+                // types.
+                for (const [arrayData, attributes] of arrayGroups) {
+                    types.push(
+                        this.makeArray(arrayData, attributes, undefined),
                     );
                 }
 

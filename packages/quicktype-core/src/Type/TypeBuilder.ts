@@ -107,6 +107,12 @@ export class TypeBuilder {
      */
     public makesDistinctObjects = false;
 
+    /**
+     * Whether inputs make distinct array types, which unions keep apart,
+     * from the target language's `supportsUnionsWithMultipleArrays`.
+     */
+    public makesDistinctArrays = false;
+
     public get typeGraph(): TypeGraph {
         assert(!!this._typeGraph, "TypeBuilder must have a TypeGraph");
         return this._typeGraph;

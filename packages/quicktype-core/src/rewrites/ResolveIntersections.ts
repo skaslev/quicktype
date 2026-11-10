@@ -19,6 +19,7 @@ import {
     emptyTypeAttributes,
     increaseTypeAttributesDistance,
     makeTypeAttributesInferred,
+    unionTypeAttributes,
 } from "../attributes/TypeAttributes.js";
 import type { GraphRewriteBuilder, TypeLookerUp } from "../GraphRewriting.js";
 import { assert, defined, mustNotHappen, panic } from "../support/Support.js";
@@ -153,7 +154,7 @@ function unifyObjects(
 }
 
 class IntersectionAccumulator
-    implements UnionTypeProvider<ReadonlySet<Type>, ObjectData>
+    implements UnionTypeProvider<ReadonlySet<TypeTerm>, ObjectData>
 {
     private _primitiveTypes: Set<PrimitiveTypeKind> | undefined;
 
@@ -163,7 +164,7 @@ class IntersectionAccumulator
     // * undefined: We haven't seen any types yet.
     // * Set: All types we've seen can be arrays.
     // * false: At least one of the types seen can't be an array.
-    private _arrayItemTypes: Set<Type> | undefined | false;
+    private _arrayItemTypes: Set<TypeTerm> | undefined | false;
 
     private _arrayAttributes: TypeAttributes = emptyTypeAttributes;
 
@@ -221,6 +222,10 @@ class IntersectionAccumulator
         }
     }
 
+    // A union only has more than one array type if it keeps them apart, see
+    // `distinctArrayGroups`.  Intersections unify them, though, like
+    // `unifyTypes` would, instead of distributing the intersection over
+    // them: the items must be of one of their item types.
     private updateArrayItemTypes(members: Iterable<Type>): void {
         const maybeTuple = iterableFind(
             members,
@@ -243,11 +248,10 @@ class IntersectionAccumulator
             return;
         }
 
-        const maybeArray = iterableFind(
-            members,
-            (t) => t instanceof ArrayType,
-        ) as ArrayType | undefined;
-        if (maybeArray === undefined) {
+        const arrays = Array.from(members).filter(
+            (t): t is ArrayType => t instanceof ArrayType,
+        );
+        if (arrays.length === 0) {
             this._arrayItemTypes = false;
             return;
         }
@@ -255,13 +259,18 @@ class IntersectionAccumulator
         this._arrayAttributes = combineTypeAttributes(
             "intersect",
             this._arrayAttributes,
-            maybeArray.getAttributes(),
+            arrays.length === 1
+                ? arrays[0].getAttributes()
+                : increaseTypeAttributesDistance(
+                      unionTypeAttributes(arrays.map((a) => a.getAttributes())),
+                  ),
         );
 
+        const items = typeTerm(new Set(arrays.map((a) => a.items)));
         if (this._arrayItemTypes === undefined) {
-            this._arrayItemTypes = new Set([maybeArray.items]);
+            this._arrayItemTypes = new Set([items]);
         } else if (this._arrayItemTypes !== false) {
-            this._arrayItemTypes.add(maybeArray.items);
+            this._arrayItemTypes.add(items);
         }
     }
 
@@ -393,7 +402,7 @@ class IntersectionAccumulator
         return makeTypeAttributesInferred(attributes);
     }
 
-    public get arrayData(): ReadonlySet<Type> {
+    public get arrayData(): ReadonlySet<TypeTerm> {
         if (
             this._arrayItemTypes === undefined ||
             this._arrayItemTypes === false
@@ -479,7 +488,7 @@ class IntersectionAccumulator
 
 class IntersectionUnionBuilder extends UnionBuilder<
     TypeBuilder & TypeLookerUp,
-    ReadonlySet<Type>,
+    ReadonlySet<TypeTerm>,
     ObjectData
 > {
     private _createdNewIntersections = false;
@@ -550,7 +559,7 @@ class IntersectionUnionBuilder extends UnionBuilder<
     }
 
     protected makeArray(
-        arrays: ReadonlySet<Type>,
+        arrays: ReadonlySet<TypeTerm>,
         typeAttributes: TypeAttributes,
         forwardingRef: TypeRef | undefined,
     ): TypeRef {
@@ -565,7 +574,7 @@ class IntersectionUnionBuilder extends UnionBuilder<
     }
 
     protected makeTuple(
-        typeProvider: UnionTypeProvider<ReadonlySet<Type>, ObjectData>,
+        typeProvider: UnionTypeProvider<ReadonlySet<TypeTerm>, ObjectData>,
         allTuples: readonly TupleType[],
         typeAttributes: TypeAttributes,
         forwardingRef: TypeRef | undefined,

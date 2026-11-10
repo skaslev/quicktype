@@ -122,6 +122,17 @@ export abstract class TargetLanguage<
         return false;
     }
 
+    /**
+     * Whether a union can have several arrays, for renderers that can tell
+     * them apart by their elements.  Unions then keep the array types of
+     * JSON Schema array schemas apart, such as the branches of a `oneOf`, if
+     * their item types can be told apart, instead of unifying them into a
+     * single array of the union of their item types.
+     */
+    public get supportsUnionsWithMultipleArrays(): boolean {
+        return false;
+    }
+
     public get supportsFullObjectType(): boolean {
         return false;
     }

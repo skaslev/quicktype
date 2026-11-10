@@ -252,6 +252,8 @@ class Run implements RunContext {
             targetLanguage.supportsRecursiveUnions;
         typeBuilder.makesDistinctObjects =
             targetLanguage.supportsUnionsWithMultipleClasses;
+        typeBuilder.makesDistinctArrays =
+            targetLanguage.supportsUnionsWithMultipleArrays;
 
         return {
             targetLanguage,

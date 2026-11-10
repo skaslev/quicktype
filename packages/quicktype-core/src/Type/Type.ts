@@ -19,6 +19,7 @@ import {
     toReadonlySet,
 } from "collection-utils";
 
+import { distinctArrayGroups } from "../attributes/DistinctArrays.js";
 import { distinctObjectGroups } from "../attributes/DistinctObjects.js";
 import type { TypeAttributes } from "../attributes/TypeAttributes.js";
 import {
@@ -1157,13 +1158,30 @@ export class UnionType extends SetOperationType {
     public get isCanonical(): boolean {
         const members = this.members;
         if (members.size <= 1) return false;
+        const arrays = Array.from(members).filter(
+            (t): t is ArrayType => t instanceof ArrayType,
+        );
         const objects = setFilter(members, (t) => t instanceof ObjectType);
-        const others = setFilter(members, (t) => !(t instanceof ObjectType));
+        const others = setFilter(
+            members,
+            (t) => !(t instanceof ArrayType) && !(t instanceof ObjectType),
+        );
         const kinds = setMap(others, (t) => t.kind);
         if (kinds.size < others.size) return false;
         if (kinds.has("union") || kinds.has("intersection")) return false;
         if (kinds.has("none") || kinds.has("any")) return false;
         if (kinds.has("string") && kinds.has("enum")) return false;
+
+        // At most one array type, unless the union keeps several apart.
+        if (arrays.length > 1) {
+            const groups = distinctArrayGroups(
+                arrays,
+                arrays.map((a) => a.getAttributes()),
+            );
+            if (groups === undefined || groups.length < arrays.length) {
+                return false;
+            }
+        }
 
         // At most one object type, unless the union keeps several apart.
         if (objects.size > 1) {

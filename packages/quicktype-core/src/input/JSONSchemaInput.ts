@@ -31,6 +31,7 @@ import {
 } from "../attributes/Constraints.js";
 import { defaultValueAttributeProducer } from "../attributes/DefaultValue.js";
 import { descriptionAttributeProducer } from "../attributes/Description.js";
+import { distinctArrayAttributes } from "../attributes/DistinctArrays.js";
 import { makeDistinctObjectAttributes } from "../attributes/DistinctObjects.js";
 import { enumValuesAttributeProducer } from "../attributes/EnumValues.js";
 import { StringTypes } from "../attributes/StringTypes.js";
@@ -1519,9 +1520,15 @@ async function addTypesInSchema(
             }
 
             if (includeArray) {
-                const arrayAttributes = combineProducedAttributes(
-                    ({ forArray }) => forArray,
-                );
+                // Unions keep the array types of different schemas apart if
+                // the target can tell them apart, which it can by their
+                // elements if their item types can be told apart.
+                const arrayAttributes = combineTypeAttributes("union", [
+                    combineProducedAttributes(({ forArray }) => forArray),
+                    typeBuilder.makesDistinctArrays
+                        ? distinctArrayAttributes
+                        : emptyTypeAttributes,
+                ]);
                 unionTypes.push(await makeArrayType(arrayAttributes));
             }
 

@@ -902,6 +902,12 @@ export abstract class ConvenienceRenderer extends Renderer {
             new Set(spelledOutTupleLengths).size ===
                 spelledOutTupleLengths.length;
 
+        // Arrays are named after their items.  A union with several arrays
+        // can have two whose items are unions, so those are named after the
+        // names proposed for the unions.
+        const hasSeveralArrays =
+            Array.from(u.members).filter((m) => m.kind === "array").length > 1;
+
         // Array items and map values can be transformed types (C# unions,
         // enums, ...), which the type graph holds as their source type.
         const typeNameForUnionMember = (t: Type): string =>
@@ -928,7 +934,8 @@ export abstract class ConvenienceRenderer extends Renderer {
                     return lookup(this.nameForNamedType(objectType));
                 },
                 (_enumType) => "enum",
-                (_unionType) => "union",
+                (unionType) =>
+                    hasSeveralArrays ? unionType.getCombinedName() : "union",
                 (transformedType) => transformedType.kind.replace("-", "_"),
                 (tupleType) => {
                     if (this.tupleNeedsName(tupleType)) {
