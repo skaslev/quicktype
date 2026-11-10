@@ -18,7 +18,7 @@ import { followTargetType } from "../../Transformers.js";
 import {
     type ClassProperty,
     type ClassType,
-    type EnumType,
+    EnumType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -124,6 +124,15 @@ export class CSharpRenderer extends ConvenienceRenderer {
     }
 
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        // In just-types mode a top-level enum takes the top-level name.
+        // Enums are converted with a transformer, so the top-level type
+        // is the string that's transformed into the enum.  Without
+        // just-types the name belongs to the class with `FromJson`.
+        if (this._csOptions.justTypes) {
+            const target = followTargetType(type);
+            if (target instanceof EnumType) return target;
+        }
+
         // If the top-level type doesn't contain any classes or unions
         // we have to define a class just for the `FromJson` method, in
         // emitFromJsonForTopLevel.
