@@ -802,6 +802,35 @@ class Resolver {
     }
 }
 
+// The names in a schema's `required`, if it's an array of them.
+function requiredPropertyNames(schema: unknown): string[] {
+    if (typeof schema !== "object" || schema === null) return [];
+    const required = (schema as StringMap).required;
+    if (!Array.isArray(required)) return [];
+    return required.filter((name): name is string => typeof name === "string");
+}
+
+// The properties an object schema requires, if that's all it says about the
+// values it allows.
+function onlyRequiredProperties(
+    schema: unknown,
+): ReadonlySet<string> | undefined {
+    if (typeof schema !== "object" || schema === null) return undefined;
+    if (Array.isArray(schema)) return undefined;
+
+    const annotations = ["title", "description", "$comment"];
+    for (const [key, value] of Object.entries(schema)) {
+        if (key === "type" && value === "object") continue;
+        if (key !== "required" && !annotations.includes(key)) {
+            return undefined;
+        }
+    }
+
+    const required = requiredPropertyNames(schema);
+    if (required.length === 0) return undefined;
+    return new Set(required);
+}
+
 async function addTypesInSchema(
     resolver: Resolver,
     typeBuilder: TypeBuilder,
@@ -809,6 +838,10 @@ async function addTypesInSchema(
     attributeProducers: JSONSchemaAttributeProducer[],
 ): Promise<void> {
     const typeForCanonicalRef = new EqualityMap<Ref, TypeRef>();
+    // The cases of a `oneOf` or `anyOf` next to an object schema that
+    // doesn't allow additional properties, by location, with the properties
+    // they don't allow either, see `closeCases`.
+    const casesClosedByParent = new EqualityMap<Ref, ReadonlySet<string>>();
 
     // The tuples being converted that become arrays of the union of their
     // item types, see `makeArrayType`.
@@ -1070,6 +1103,12 @@ async function addTypesInSchema(
 
         typeAttributes = makeAttributes(typeAttributes);
         const inferredAttributes = makeTypeAttributesInferred(typeAttributes);
+        const closedByParent = casesClosedByParent.get(loc.canonicalRef);
+        // The required and the declared properties of this schema's object
+        // type, if it doesn't allow additional properties.
+        let closedObject:
+            | { required: ReadonlySet<string>; properties: ReadonlySet<string> }
+            | undefined;
 
         function makeStringType(attributes: TypeAttributes): TypeRef {
             const kind = typeKindForJSONSchemaFormat(schema.format);
@@ -1326,10 +1365,29 @@ async function addTypesInSchema(
             // properties if they don't allow any others.  quicktype ignores
             // pattern properties other than `.*`, so it would take an
             // object with them for one without additional properties.
-            const isDistinct =
-                typeBuilder.makesDistinctObjects &&
+            const isClosed =
                 additionalProperties === false &&
                 schema.patternProperties === undefined;
+            if (isClosed) {
+                closedObject = {
+                    required: new Set(required),
+                    properties: new Set(Object.getOwnPropertyNames(properties)),
+                };
+            }
+
+            // So is the object type of a case of a `oneOf` or `anyOf` next
+            // to such a schema, which doesn't allow the properties a value
+            // of the case must not have, see `closeCases`.
+            if (closedByParent !== undefined && closedByParent.size > 0) {
+                properties = { ...properties };
+                for (const name of closedByParent) {
+                    properties[name] = false;
+                }
+            }
+
+            const isDistinct =
+                typeBuilder.makesDistinctObjects &&
+                (isClosed || closedByParent !== undefined);
             const objectAttributes = combineTypeAttributes("union", [
                 inferredAttributes,
                 combineProducedAttributes(({ forObject }) => forObject),
@@ -1385,6 +1443,59 @@ async function addTypesInSchema(
             undefined,
         );
         setTypeForLocation(loc, intersectionType);
+
+        // The object types of the cases of a `oneOf` or `anyOf` next to an
+        // object schema that doesn't allow additional properties are only
+        // intersected with that schema's object type, so they don't allow
+        // additional properties either.  They are distinct, so that unions
+        // keep them apart until the intersection distributes over them,
+        // see `distributeObjects`.  A value of a `oneOf` case also must not
+        // be a value of another case.  If the other case only requires
+        // properties, and this one requires all of them but one, a value
+        // of this case must not have that property.  If this one requires
+        // all of them, it has no values, and no case is distinct.
+        function closeCases(
+            cases: unknown,
+            kind: "oneOf" | "anyOf",
+            parent: {
+                required: ReadonlySet<string>;
+                properties: ReadonlySet<string>;
+            },
+        ): void {
+            if (!Array.isArray(cases)) return;
+
+            const requiredOnly = cases.map(onlyRequiredProperties);
+            const forbidden = cases.map(() => new Set<string>());
+            if (kind === "oneOf") {
+                for (let i = 0; i < cases.length; i++) {
+                    const required = new Set(parent.required);
+                    for (const name of requiredPropertyNames(cases[i])) {
+                        required.add(name);
+                    }
+
+                    for (let j = 0; j < cases.length; j++) {
+                        const other = requiredOnly[j];
+                        if (i === j || other === undefined) continue;
+
+                        const missing = setSubtract(other, required);
+                        if (missing.size === 0) return;
+                        const name = defined(iterableFirst(missing));
+                        if (missing.size === 1 && parent.properties.has(name)) {
+                            forbidden[i].add(name);
+                        }
+                    }
+                }
+            }
+
+            const kindLoc = loc.push(kind);
+            cases.forEach((c, i) => {
+                if (typeof c !== "object" || c === null) return;
+                casesClosedByParent.set(
+                    kindLoc.push(i.toString()).canonicalRef,
+                    forbidden[i],
+                );
+            });
+        }
 
         async function convertOneOrAnyOf(
             cases: unknown[],
@@ -1570,6 +1681,11 @@ async function addTypesInSchema(
 
         if (schema.allOf !== undefined) {
             types.push(...(await makeTypesFromCases(schema.allOf, "allOf")));
+        }
+
+        if (closedObject !== undefined && typeBuilder.makesDistinctObjects) {
+            closeCases(schema.oneOf, "oneOf", closedObject);
+            closeCases(schema.anyOf, "anyOf", closedObject);
         }
 
         if (schema.oneOf !== undefined) {

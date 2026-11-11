@@ -306,20 +306,6 @@ describe("unions unify arrays", () => {
         );
         expect(output).toMatch(/^export type TopLevel = (\w+)\[\];$/m);
     });
-
-    // Keeping the arrays apart would distribute the intersection over the
-    // union.
-    test("intersected with another array", async () => {
-        expect(
-            await renderSchema({
-                type: "array",
-                oneOf: [
-                    { items: { type: "string" } },
-                    { items: { type: "integer" } },
-                ],
-            }),
-        ).toContain(merged);
-    });
 });
 
 describe("union members", () => {

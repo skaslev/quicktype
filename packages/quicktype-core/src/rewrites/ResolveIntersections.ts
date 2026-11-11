@@ -3,6 +3,7 @@ import {
     iterableEvery,
     iterableFind,
     iterableFirst,
+    iterableSome,
     mapMap,
     mapMapEntries,
     mapMergeWithInto,
@@ -10,9 +11,16 @@ import {
     setFilter,
     setIntersect,
     setMap,
+    setSubtract,
     setUnionInto,
 } from "collection-utils";
 
+import {
+    isDistinctArray,
+    itemIntersectionsConflict,
+    keysOfKind,
+} from "../attributes/DistinctArrays.js";
+import { distinctObjectGroups } from "../attributes/DistinctObjects.js";
 import {
     type TypeAttributes,
     combineTypeAttributes,
@@ -29,6 +37,7 @@ import {
     IntersectionType,
     ObjectType,
     type PrimitiveTypeKind,
+    SetOperationType,
     TupleType,
     Type,
     type TypeKind,
@@ -83,9 +92,9 @@ function typeTerm(types: ReadonlySet<Type>): TypeTerm {
 
 // The properties, additional properties, and attributes of the object types
 // in a union.  A union only has more than one if it keeps them apart, see
-// `distinctObjectGroups`.  Intersections unify them, though, like `unifyTypes`
-// would: intersecting with each of them would distribute the intersection
-// over the union, and could make object types that are impossible.
+// `distinctObjectGroups`.  Intersections unify them, like `unifyTypes` would,
+// unless they distribute over the union, see `distributeObjects`:
+// intersecting with each of them can make object types that are impossible.
 function unifyObjects(
     objects: readonly ObjectType[],
 ): [
@@ -153,6 +162,203 @@ function unifyObjects(
     ];
 }
 
+// The types of one kind, object or array, that an intersection intersects,
+// for each case of a union it distributes over: a union that keeps several
+// object or array types apart, see `distinctObjectGroups` and
+// `distinctArrayGroups`.  The intersection is then the union of its
+// intersections with each of them, if those can be kept apart, too, see
+// `distributeObjects` and `distributeArrays`.  It distributes over at most
+// one union.
+class Distribution<T extends Type> {
+    private _cases: T[][] | undefined = [[]];
+
+    private _isDistributed = false;
+
+    public add(types: readonly T[]): void {
+        if (this._cases === undefined) return;
+
+        if (types.length === 0) {
+            this._cases = undefined;
+        } else if (types.length === 1) {
+            for (const c of this._cases) {
+                c.push(types[0]);
+            }
+        } else if (this._isDistributed) {
+            this._cases = undefined;
+        } else {
+            this._isDistributed = true;
+            this._cases = this._cases.flatMap((c) =>
+                types.map((t) => [...c, t]),
+            );
+        }
+    }
+
+    public get cases(): ReadonlyArray<readonly T[]> | undefined {
+        return this._isDistributed ? this._cases : undefined;
+    }
+}
+
+// The keys, see `keysOfKind`, of the values of `t`, or `undefined` if it can
+// have values of any key.  An intersection that hasn't been resolved yet
+// can only have values of the keys of all its members.
+function valueKeys(t: Type, seen: Set<Type>): ReadonlySet<string> | undefined {
+    if (t.kind === "any" || seen.has(t)) return undefined;
+    if (t.kind === "none") return new Set();
+    if (!(t instanceof SetOperationType)) return new Set(keysOfKind(t.kind));
+
+    seen.add(t);
+    const keys =
+        t instanceof UnionType
+            ? unionKeys(t.members, seen)
+            : intersectionKeys(t.members, seen);
+    seen.delete(t);
+    return keys;
+}
+
+function unionKeys(
+    types: Iterable<Type>,
+    seen: Set<Type>,
+): ReadonlySet<string> | undefined {
+    const keys = new Set<string>();
+    for (const t of types) {
+        const memberKeys = valueKeys(t, seen);
+        if (memberKeys === undefined) return undefined;
+        setUnionInto(keys, memberKeys);
+    }
+
+    return keys;
+}
+
+function intersectionKeys(
+    terms: Iterable<TypeTerm>,
+    seen: Set<Type>,
+): ReadonlySet<string> | undefined {
+    let keys: ReadonlySet<string> | undefined;
+    for (const term of terms) {
+        const termKeys =
+            term instanceof Type
+                ? valueKeys(term, seen)
+                : unionKeys(term, seen);
+        if (termKeys === undefined) continue;
+        keys = keys === undefined ? termKeys : setIntersect(keys, termKeys);
+    }
+
+    return keys;
+}
+
+// The object types an intersection makes by distributing over the object
+// types of a union, one for each, if they can be kept apart, too: each must
+// not allow additional properties, and must be made from different
+// schemas, so that a union keeps them apart, see `distinctObjectGroups`.
+// Each must also have values.  An object type that doesn't allow
+// additional properties must declare all properties the others declare:
+// the intersection keeps them, though it doesn't allow them, and one that
+// another requires would make it impossible.  A property of types without
+// values in common, such as one declared `false`, is left out if it's
+// optional, and makes the object type impossible if it's required.
+// Otherwise the intersection unifies the union's object types into one,
+// see `unifyObjects`.
+function distributeObjects(
+    cases: ReadonlyArray<readonly ObjectType[]> | undefined,
+    intersect: (
+        objects: readonly ObjectType[],
+    ) => [PropertyMap, ReadonlySet<TypeTerm> | undefined, TypeAttributes],
+): Array<[ObjectData, TypeAttributes]> | undefined {
+    if (cases === undefined) return undefined;
+
+    const groups: Array<[ObjectData, TypeAttributes]> = [];
+    for (const objects of cases) {
+        const [properties, additionalProperties, attributes] =
+            intersect(objects);
+        if (additionalProperties !== undefined) return undefined;
+
+        for (const o of objects) {
+            if (o.getAdditionalProperties() !== undefined) continue;
+            for (const name of properties.keys()) {
+                if (!o.getProperties().has(name)) return undefined;
+            }
+        }
+
+        for (const [name, property] of properties) {
+            const keys = intersectionKeys(property.typeData, new Set());
+            if (keys === undefined || keys.size > 0) continue;
+
+            if (!property.isOptional) return undefined;
+            properties.delete(name);
+        }
+
+        groups.push([[properties, undefined], attributes]);
+    }
+
+    const distinctGroups = distinctObjectGroups(groups.map(([, a]) => a));
+    if (distinctGroups === undefined || distinctGroups.length < groups.length) {
+        return undefined;
+    }
+
+    return groups;
+}
+
+// The array types an intersection makes by distributing over the array
+// types of a union, one for each, if a union keeps them apart, too, see
+// `distinctArrayGroups`.  Otherwise the intersection unifies the union's
+// array types into one, see `updateArrayItemTypes`.
+function distributeArrays(
+    cases: ReadonlyArray<readonly ArrayType[]> | undefined,
+): Array<[ReadonlySet<TypeTerm>, TypeAttributes]> | undefined {
+    if (cases === undefined) return undefined;
+
+    const items = cases.map((arrays) =>
+        arrays.map((a) => a.items).filter((t) => t.kind !== "any"),
+    );
+    const attributes = cases.map((arrays) =>
+        combineTypeAttributes(
+            "intersect",
+            arrays.map((a) => a.getAttributes()),
+        ),
+    );
+    if (!attributes.every(isDistinctArray)) return undefined;
+
+    for (let i = 0; i < cases.length; i++) {
+        for (let j = i + 1; j < cases.length; j++) {
+            if (itemIntersectionsConflict(items[i], items[j])) {
+                return undefined;
+            }
+        }
+    }
+
+    return cases.map((_, i) => [new Set<TypeTerm>(items[i]), attributes[i]]);
+}
+
+// The members of an intersection without the unions that keep several
+// object or array types apart and have another member as one of theirs,
+// and the attributes of those unions: the intersection of such a union and
+// one of its members is that member.  Distributing over the union could
+// only unify the union's other members instead, if intersecting them with
+// that one makes impossible types, see `distributeObjects`.
+function withoutAbsorbedUnions(
+    members: ReadonlySet<Type>,
+): [ReadonlySet<Type>, TypeAttributes] {
+    const absorbed = setFilter(members, (u) => {
+        if (!(u instanceof UnionType)) return false;
+
+        const unionMembers = Array.from(u.members);
+        const objects = unionMembers.filter((m) => m instanceof ObjectType);
+        const arrays = unionMembers.filter((m) => m instanceof ArrayType);
+        if (objects.length < 2 && arrays.length < 2) return false;
+
+        return iterableSome(members, (m) => m !== u && u.members.has(m));
+    });
+    if (absorbed.size === 0) return [members, emptyTypeAttributes];
+
+    const attributes = makeTypeAttributesInferred(
+        combineTypeAttributes(
+            "intersect",
+            Array.from(absorbed, (u) => u.getAttributes()),
+        ),
+    );
+    return [setSubtract(members, absorbed), attributes];
+}
+
 class IntersectionAccumulator
     implements UnionTypeProvider<ReadonlySet<TypeTerm>, ObjectData>
 {
@@ -173,6 +379,8 @@ class IntersectionAccumulator
     // `_arrayItemTypes` constrain each of its items.
     private readonly _tuples: TupleType[] = [];
 
+    private readonly _arrayCases = new Distribution<ArrayType>();
+
     // We start out with all object types allowed, which means
     // _additionalPropertyTypes is empty - no restrictions - and
     // _classProperties is empty - no defined properties so far.
@@ -186,6 +394,8 @@ class IntersectionAccumulator
     private _objectAttributes: TypeAttributes = emptyTypeAttributes;
 
     private _additionalPropertyTypes: Set<TypeTerm> | undefined = new Set();
+
+    private readonly _objectCases = new Distribution<ObjectType>();
 
     private _lostTypeAttributes = false;
 
@@ -223,9 +433,9 @@ class IntersectionAccumulator
     }
 
     // A union only has more than one array type if it keeps them apart, see
-    // `distinctArrayGroups`.  Intersections unify them, though, like
-    // `unifyTypes` would, instead of distributing the intersection over
-    // them: the items must be of one of their item types.
+    // `distinctArrayGroups`.  Intersections unify them, like `unifyTypes`
+    // would, unless they distribute over the union, see `distributeArrays`:
+    // the items must be of one of their item types.
     private updateArrayItemTypes(members: Iterable<Type>): void {
         const maybeTuple = iterableFind(
             members,
@@ -251,6 +461,7 @@ class IntersectionAccumulator
         const arrays = Array.from(members).filter(
             (t): t is ArrayType => t instanceof ArrayType,
         );
+        this._arrayCases.add(arrays);
         if (arrays.length === 0) {
             this._arrayItemTypes = false;
             return;
@@ -278,6 +489,7 @@ class IntersectionAccumulator
         const objects = Array.from(members).filter(
             (t): t is ObjectType => t instanceof ObjectType,
         );
+        this._objectCases.add(objects);
         if (objects.length === 0) {
             this._objectProperties = undefined;
             this._additionalPropertyTypes = undefined;
@@ -417,6 +629,27 @@ class IntersectionAccumulator
 
     public get tupleData(): readonly TupleType[] {
         return this._tuples;
+    }
+
+    public get arrayGroups():
+        | Array<[ReadonlySet<TypeTerm>, TypeAttributes]>
+        | undefined {
+        return distributeArrays(this._arrayCases.cases);
+    }
+
+    public get objectGroups(): Array<[ObjectData, TypeAttributes]> | undefined {
+        return distributeObjects(this._objectCases.cases, (objects) => {
+            const accumulator = new IntersectionAccumulator();
+            for (const o of objects) {
+                accumulator.updateObjectProperties([o]);
+            }
+
+            return [
+                defined(accumulator._objectProperties),
+                accumulator._additionalPropertyTypes,
+                accumulator._objectAttributes,
+            ];
+        });
     }
 
     public get objectData(): ObjectData {
@@ -635,11 +868,17 @@ export function resolveIntersections(
             types,
             (t) => t instanceof IntersectionType,
         ) as Set<IntersectionType>;
-        const [members, intersectionAttributes] =
+        const [allMembers, setOperationAttributes] =
             setOperationMembersRecursively(
                 Array.from(intersections),
                 "intersect",
             );
+        const [members, absorbedAttributes] = withoutAbsorbedUnions(allMembers);
+        const intersectionAttributes = combineTypeAttributes(
+            "intersect",
+            setOperationAttributes,
+            absorbedAttributes,
+        );
         if (members.size === 0) {
             const t = builder.getPrimitiveType(
                 "any",

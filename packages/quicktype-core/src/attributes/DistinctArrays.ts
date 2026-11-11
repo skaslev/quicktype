@@ -59,7 +59,7 @@ export function isDistinctArray(attributes: TypeAttributes): boolean {
 // targets, and the transformed string types.  An integer or a bool string is
 // a string in JSON, but decodes into an integer or a bool, and a union with
 // integers or bools makes it one member with them, so it has both keys.
-function keysOfKind(kind: TypeKind): string[] {
+export function keysOfKind(kind: TypeKind): string[] {
     if (kind === "integer" || kind === "double") return ["number"];
     if (kind === "enum") return ["string"];
     if (isPrimitiveStringTypeKind(kind)) {
@@ -192,6 +192,40 @@ function itemsConflict(a: Type, b: Type, seen: Set<string>): boolean {
     return aMembers.some((x) =>
         bMembers.some((y) => membersConflict(x, y, seen)),
     );
+}
+
+/**
+ * Whether a union would unify two array types whose item types are the
+ * intersections of `a` and of `b`, see `distinctArrayGroups`.  An
+ * intersection of a single type is that type, and one of no types is `any`.
+ */
+export function itemIntersectionsConflict(
+    a: readonly Type[],
+    b: readonly Type[],
+): boolean {
+    if (a.length === 1 && b.length === 1) {
+        return itemsConflict(a[0], b[0], new Set());
+    }
+
+    // Like `membersConflict` with intersections that haven't been resolved.
+    const aKeys = intersectionKeys(a);
+    const bKeys = intersectionKeys(b);
+    if (aKeys === undefined || bKeys === undefined) return true;
+    if (aKeys.size === 0 || bKeys.size === 0) return true;
+    return setIntersect(aKeys, bKeys).size > 0;
+}
+
+function intersectionKeys(
+    types: readonly Type[],
+): ReadonlySet<string> | undefined {
+    let keys: ReadonlySet<string> | undefined;
+    for (const t of types) {
+        const memberKeys = possibleKeys(t, new Set());
+        if (memberKeys === undefined) continue;
+        keys = keys === undefined ? memberKeys : setIntersect(keys, memberKeys);
+    }
+
+    return keys;
 }
 
 /**
