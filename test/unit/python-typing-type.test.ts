@@ -62,8 +62,8 @@ describe("Python typing.Type compatibility (issue #1728)", () => {
         expect(output).not.toMatch(/from typing import [^\n]*\bType\b/);
         expect(output).not.toMatch(/\bType\[/);
         expect(output).toContain("def to_class(c, x: Any) -> dict:");
-        expect(output).toContain("def to_enum(c, x: Any) -> EnumT:");
-        expect(output).toContain("def is_type(t, x: Any) -> T:");
+        expect(output).toContain("def to_enum(c, x: Any) -> Any:");
+        expect(output).toContain("def is_type(t, x: Any) -> Any:");
     });
 
     test("Python 3.7 keeps typing.Type annotations", async () => {

@@ -348,24 +348,36 @@ export class JSONPythonRenderer extends PythonRenderer {
         );
     }
 
-    protected typingTypeHint(tvar: Sourcelike): Sourcelike {
+    // The annotation of a converter's class parameter, `: Type[T]`, and the
+    // type of the class's instances, `T`.  Without `typing.Type` the class
+    // can't be annotated, so its instances are `Any`: a TypeVar return type
+    // that no parameter mentions binds to nothing, and mypy rejects it.
+    protected classParameterHint(
+        typeVar: () => string,
+    ): [classHint: Sourcelike, instanceType: Sourcelike] {
         if (!this.pyOptions.features.typingType) {
-            return [];
+            return [[], this.withTyping("Any")];
         }
 
-        return this.typeHint(": ", this.withTyping("Type"), "[", tvar, "]");
+        const tvar = typeVar();
+        return [
+            this.typeHint(": ", this.withTyping("Type"), "[", tvar, "]"),
+            tvar,
+        ];
     }
 
     protected emitToEnumConverter(): void {
-        const tvar = this.enumTypeVar();
+        const [classHint, enumType] = this.classParameterHint(() =>
+            this.enumTypeVar(),
+        );
         this.emitBlock(
             [
                 "def to_enum(c",
-                this.typingTypeHint(tvar),
+                classHint,
                 ", ",
                 this.typingDecl("x", "Any"),
                 ")",
-                this.typeHint(" -> ", tvar),
+                this.typeHint(" -> ", enumType),
                 ":",
             ],
             () => {
@@ -411,11 +423,11 @@ export class JSONPythonRenderer extends PythonRenderer {
     }
 
     protected emitToClassConverter(): void {
-        const tvar = this.typeVar();
+        const [classHint] = this.classParameterHint(() => this.typeVar());
         this.emitBlock(
             [
                 "def to_class(c",
-                this.typingTypeHint(tvar),
+                classHint,
                 ", ",
                 this.typingDecl("x", "Any"),
                 ")",
@@ -569,15 +581,17 @@ export class JSONPythonRenderer extends PythonRenderer {
     }
 
     protected emitIsTypeConverter(): void {
-        const tvar = this.typeVar();
+        const [typeHint, instanceType] = this.classParameterHint(() =>
+            this.typeVar(),
+        );
         this.emitBlock(
             [
                 "def is_type(t",
-                this.typingTypeHint(tvar),
+                typeHint,
                 ", ",
                 this.typingDecl("x", "Any"),
                 ")",
-                this.typeHint(" -> ", tvar),
+                this.typeHint(" -> ", instanceType),
                 ":",
             ],
             () => {
