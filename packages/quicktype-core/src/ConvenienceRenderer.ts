@@ -879,7 +879,7 @@ export abstract class ConvenienceRenderer extends Renderer {
     }
 
     protected proposeUnionMemberName(
-        _u: UnionType,
+        u: UnionType,
         _unionName: Name,
         fieldType: Type,
         lookup: (n: Name) => string,
@@ -890,6 +890,17 @@ export abstract class ConvenienceRenderer extends Renderer {
         if (simpleName !== null) {
             return simpleName;
         }
+
+        // A union has a tuple member for each shape, see `tupleShapeGroups`.
+        // If it spells out several, of different lengths, they are named
+        // after their lengths, instead of all proposing "tuple".
+        const spelledOutTupleLengths = Array.from(u.members)
+            .filter((m) => m instanceof TupleType && !this.tupleNeedsName(m))
+            .map((m) => (m as TupleType).items.length);
+        const namesTuplesByLength =
+            spelledOutTupleLengths.length > 1 &&
+            new Set(spelledOutTupleLengths).size ===
+                spelledOutTupleLengths.length;
 
         // Array items and map values can be transformed types (C# unions,
         // enums, ...), which the type graph holds as their source type.
@@ -919,10 +930,15 @@ export abstract class ConvenienceRenderer extends Renderer {
                 (_enumType) => "enum",
                 (_unionType) => "union",
                 (transformedType) => transformedType.kind.replace("-", "_"),
-                (tupleType) =>
-                    this.tupleNeedsName(tupleType)
-                        ? lookup(this.nameForNamedType(tupleType))
-                        : "tuple",
+                (tupleType) => {
+                    if (this.tupleNeedsName(tupleType)) {
+                        return lookup(this.nameForNamedType(tupleType));
+                    }
+
+                    return namesTuplesByLength && tupleType === fieldType
+                        ? `tuple${tupleType.items.length}`
+                        : "tuple";
+                },
             );
 
         return typeNameForUnionMember(fieldType);
