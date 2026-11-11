@@ -78,13 +78,6 @@ describe("targets that declare recursive unions", () => {
     // unions that contain each other through arrays.
     test.each([
         ["csharp", ["public Leaf? Leaf;", "public TopLevelNode[]? "]],
-        [
-            "kotlin",
-            [
-                /LeafValue\(val value: Leaf\)/,
-                /UnionArrayValue\(val value: List<TopLevelNode>\)/,
-            ],
-        ],
         ["pike", ["typedef Leaf|array(TopLevelNode) PurpleNode;"]],
         // Unions are `dynamic` and `id`, but the leaves' class is declared.
         ["dart", ["class Leaf {"]],
@@ -99,11 +92,31 @@ describe("targets that declare recursive unions", () => {
 
     test.each([
         ["csharp", /public TopLevelElement\[\]\? \w+;/],
-        ["kotlin", /UnionArrayValue\(val value: List<TopLevelElement>\)/],
         ["pike", /typedef string\|array\(TopLevelElement\) TopLevelElement;/],
     ] as const)("%s keeps a tuple that is its own item", async (lang, expected) => {
         const output = await renderSchema(lang, chain, justTypes);
         expect(output).toMatch(expected);
+    });
+});
+
+// Kotlin declares recursive unions too, but keeps the tuples themselves.
+describe("targets with tuples", () => {
+    test("kotlin keeps a tuple's reference to itself", async () => {
+        const output = await renderSchema("kotlin", tree, justTypes);
+        expect(output).toContain(
+            [
+                "data class Node (",
+                "    val item0: String,",
+                "    val item1: List<Leaf>? = null,",
+                "    val item2: List<Node>? = null",
+                ")",
+            ].join("\n"),
+        );
+    });
+
+    test("kotlin keeps a tuple that is its own item", async () => {
+        const output = await renderSchema("kotlin", chain, justTypes);
+        expect(output).toContain("    val item1: TopLevel? = null");
     });
 });
 

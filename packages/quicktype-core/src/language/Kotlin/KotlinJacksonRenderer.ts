@@ -9,7 +9,7 @@ import {
 import type { Name } from "../../Naming.js";
 import { type Sourcelike, modifySource } from "../../Source.js";
 import { camelCase } from "../../support/Strings.js";
-import { mustNotHappen } from "../../support/Support.js";
+import { defined, mustNotHappen } from "../../support/Support.js";
 import {
     type ArrayType,
     type ClassProperty,
@@ -17,13 +17,18 @@ import {
     type EnumType,
     type MapType,
     type PrimitiveType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import { matchType, nullableFromUnion } from "../../Type/TypeUtils.js";
 
 import { KotlinRenderer } from "./KotlinRenderer.js";
-import { stringEscape, unionMemberMatchPriority } from "./utils.js";
+import {
+    expectedTupleLength,
+    stringEscape,
+    unionMemberMatchPriority,
+} from "./utils.js";
 
 export class KotlinJacksonRenderer extends KotlinRenderer {
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
@@ -76,7 +81,46 @@ export class KotlinJacksonRenderer extends KotlinRenderer {
             (_enumType) => "is TextNode",
             (_unionType) => mustNotHappen(),
             (_transformedStringType) => "is TextNode",
+            (_tupleType) => "is ArrayNode",
         );
+    }
+
+    /**
+     * The check that the JSON value `e` of a tuple item has the item's type,
+     * or undefined if converting it checks that.  Jackson would also convert
+     * a number to a String, say, and a union trying its members in turn
+     * would then take the wrong tuple.  A union's `fromJson` checks its
+     * value; null for a type that isn't nullable fails Kotlin's null check.
+     */
+    private jsonNodeCheck(t: Type, e: string): string | undefined {
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable === null) return undefined;
+            const check = this.jsonNodeCheck(nullable, e);
+            return check === undefined ? undefined : `${e}.isNull || ${check}`;
+        }
+
+        switch (t.kind) {
+            case "any":
+                return undefined;
+            case "null":
+                return `${e}.isNull`;
+            case "bool":
+                return `${e}.isBoolean`;
+            case "integer":
+                return `${e}.isIntegralNumber`;
+            case "double":
+                return `${e}.isNumber`;
+            case "array":
+            case "tuple":
+                return `${e}.isArray`;
+            case "class":
+            case "map":
+                return `${e}.isObject`;
+            default:
+                // Strings, enums, dates and times.
+                return `${e}.isTextual`;
+        }
     }
 
     protected emitUsageHeader(): void {
@@ -122,11 +166,16 @@ import com.fasterxml.jackson.module.kotlin.*`);
             this.typeGraph.allNamedTypes(),
             (c) => c instanceof ClassType && c.getProperties().size === 0,
         );
+        const hasTuples = iterableSome(
+            this.typeGraph.allTypesUnordered(),
+            (t) => t instanceof TupleType,
+        );
         const usesDateTime = this.haveTransformedStringType("date-time");
         const usesDate = this.haveTransformedStringType("date");
         const usesTime = this.haveTransformedStringType("time");
         if (
             hasUnions ||
+            hasTuples ||
             this.haveEnums ||
             hasEmptyObjects ||
             usesDateTime ||
@@ -185,6 +234,14 @@ import com.fasterxml.jackson.module.kotlin.*`);
                 ["convert(", name, "::class,"],
                 [" { ", name, ".fromJson(it) },"],
                 [" { it.toJson() }, true)"],
+            ]);
+        });
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (_, name) => {
+            converters.push([
+                ["convert(", name, "::class,"],
+                [" { ", name, ".fromJson(it) },"],
+                [" { it.toJson() })"],
             ]);
         });
 
@@ -329,7 +386,11 @@ import com.fasterxml.jackson.module.kotlin.*`);
             this.emitBlock(")", () => {
                 const checks: string[] = [];
                 this.forEachClassProperty(c, "none", (name, _json, p) => {
-                    const [min, max] = minMaxItemsForType(p.type) ?? [];
+                    // A tuple's `fromJson` checks its length.
+                    const [min, max] =
+                        p.type instanceof TupleType
+                            ? []
+                            : (minMaxItemsForType(p.type) ?? []);
                     const n = this.sourcelikeToString(name);
                     const before = p.isOptional
                         ? `${n}?.let { require(it.size`
@@ -386,6 +447,159 @@ import com.fasterxml.jackson.module.kotlin.*`);
         } else {
             this.emitLine(")");
         }
+    }
+
+    // A tuple is a JSON array: `toJson` writes the required items, the
+    // optional ones that are present, then the rest; `fromJson` checks the
+    // array's length and the JSON type of each item before converting it.
+    protected emitTupleDefinitionMethods(t: TupleType, tupleName: Name): void {
+        const properties = this.tupleProperties(t, tupleName);
+        const fail = (verb: string, message: string): Sourcelike => [
+            '"Cannot ',
+            verb,
+            " ",
+            tupleName,
+            ": ",
+            message,
+            '"',
+        ];
+        const restProperty = properties.find((p) => p.kind === "rest");
+
+        this.emitBlock(")", () => {
+            if (this.emitTupleHolders(t, tupleName)) this.ensureBlankLine();
+            this.emitTupleToJson(
+                t,
+                tupleName,
+                "fun toJson(): String",
+                (elements) => ["mapper.writeValueAsString(", elements, ")"],
+            );
+
+            this.ensureBlankLine();
+            this.emitBlock("companion object", () => {
+                this.emitBlock(
+                    ["fun fromJson(jn: JsonNode): ", tupleName],
+                    () => {
+                        const min = t.minItems;
+                        const max = t.items.length;
+                        const length =
+                            restProperty !== undefined
+                                ? min === 0
+                                    ? ""
+                                    : ` && jn.size() >= ${min}`
+                                : min === max
+                                  ? ` && jn.size() == ${max}`
+                                  : ` && jn.size() in ${min}..${max}`;
+                        this.emitLine(
+                            "require(jn.isArray",
+                            length,
+                            ") { ",
+                            fail(
+                                "deserialize",
+                                `expected ${expectedTupleLength(t)}`,
+                            ),
+                            " }",
+                        );
+                        const unexpected = (
+                            e: string,
+                            what: string,
+                        ): Sourcelike =>
+                            fail(
+                                "deserialize",
+                                `unexpected \${${e}.nodeType} for ${what}`,
+                            );
+                        properties.forEach((p, i) => {
+                            if (p.kind === "rest") return;
+                            const e = `jn[${i}]`;
+                            const check = this.jsonNodeCheck(p.type, e);
+                            if (check === undefined) return;
+                            this.emitLine(
+                                "require(",
+                                p.kind === "required"
+                                    ? ""
+                                    : `jn.size() <= ${i} || `,
+                                check,
+                                ") { ",
+                                unexpected(e, p.name),
+                                " }",
+                            );
+                        });
+                        this.emitLine("return ", tupleName, "(");
+                        this.indent(() => {
+                            properties.forEach((p, i) => {
+                                const comma =
+                                    i === properties.length - 1 ? "" : ",";
+                                const e = `jn[${i}]`;
+                                switch (p.kind) {
+                                    case "required":
+                                        this.emitLine(
+                                            "mapper.convertValue(",
+                                            e,
+                                            ")",
+                                            comma,
+                                        );
+                                        break;
+                                    case "optional":
+                                        this.emitLine(
+                                            "if (jn.size() > ",
+                                            i.toString(),
+                                            ") mapper.convertValue(",
+                                            e,
+                                            ") else null",
+                                            comma,
+                                        );
+                                        break;
+                                    case "optional-nullable":
+                                        this.emitLine(
+                                            "if (jn.size() > ",
+                                            i.toString(),
+                                            ") ",
+                                            defined(p.holder),
+                                            "(mapper.convertValue<",
+                                            this.kotlinType(p.type),
+                                            ">(",
+                                            e,
+                                            ")) else null",
+                                            comma,
+                                        );
+                                        break;
+                                    case "rest": {
+                                        const check = this.jsonNodeCheck(
+                                            p.type,
+                                            "it",
+                                        );
+                                        this.emitBlock(
+                                            ["jn.drop(", i.toString(), ").map"],
+                                            () => {
+                                                if (check !== undefined) {
+                                                    this.emitLine(
+                                                        "require(",
+                                                        check,
+                                                        ") { ",
+                                                        unexpected(
+                                                            "it",
+                                                            "an item of the rest",
+                                                        ),
+                                                        " }",
+                                                    );
+                                                }
+
+                                                this.emitLine(
+                                                    "mapper.convertValue<",
+                                                    this.kotlinType(p.type),
+                                                    ">(it)",
+                                                );
+                                            },
+                                        );
+                                        break;
+                                    }
+                                }
+                            });
+                        });
+                        this.emitLine(")");
+                    },
+                );
+            });
+        });
     }
 
     protected renameAttribute(

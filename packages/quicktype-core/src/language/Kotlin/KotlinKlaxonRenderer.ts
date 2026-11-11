@@ -9,7 +9,7 @@ import {
 import type { Name } from "../../Naming.js";
 import { type Sourcelike, modifySource } from "../../Source.js";
 import { camelCase } from "../../support/Strings.js";
-import { mustNotHappen } from "../../support/Support.js";
+import { defined, mustNotHappen } from "../../support/Support.js";
 import {
     ArrayType,
     type ClassProperty,
@@ -17,13 +17,18 @@ import {
     type EnumType,
     MapType,
     type PrimitiveType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import { matchType, nullableFromUnion } from "../../Type/TypeUtils.js";
 
 import { KotlinRenderer } from "./KotlinRenderer.js";
-import { stringEscape, unionMemberMatchPriority } from "./utils.js";
+import {
+    expectedTupleLength,
+    stringEscape,
+    unionMemberMatchPriority,
+} from "./utils.js";
 
 export class KotlinKlaxonRenderer extends KotlinRenderer {
     private unionMemberFromJsonValue(t: Type, e: Sourcelike): Sourcelike {
@@ -82,6 +87,184 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
 
                 return [e, ".string"];
             },
+            (tupleType) => [
+                e,
+                ".array?.let { ",
+                this.nameForNamedType(tupleType),
+                ".fromJson(",
+                e,
+                ") }",
+            ],
+        );
+    }
+
+    /**
+     * A tuple item of type `t` from `v`, the value Klaxon parsed for it, or
+     * an exception if `v` isn't one.  Klaxon parses JSON into Kotlin values:
+     * strings, numbers, booleans, `JsonObject`s, `JsonArray`s and null.
+     * Arrays and maps are converted element by element: Klaxon's
+     * `parseFromJsonObject` can't make maps, and `JsonValue` can't hold
+     * null.
+     */
+    private tupleItemFromKlaxonValue(
+        t: Type,
+        v: string,
+        what: string,
+        tupleName: Name,
+        depth = 0,
+    ): Sourcelike {
+        const orThrow = (value: Sourcelike): Sourcelike => [
+            "(",
+            value,
+            ' ?: throw IllegalArgumentException("Cannot deserialize ',
+            tupleName,
+            ": unexpected ${",
+            v,
+            "} for ",
+            what,
+            '"))',
+        ];
+        const jsonValue: Sourcelike = [
+            "JsonValue(",
+            v,
+            ", null, null, klaxon)",
+        ];
+        const element = `x${depth}`;
+        const elementValue = (items: Type): Sourcelike =>
+            this.tupleItemFromKlaxonValue(
+                items,
+                element,
+                what,
+                tupleName,
+                depth + 1,
+            );
+
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable !== null) {
+                return [
+                    "(if (",
+                    v,
+                    " == null) null else ",
+                    this.tupleItemFromKlaxonValue(
+                        nullable,
+                        v,
+                        what,
+                        tupleName,
+                        depth,
+                    ),
+                    ")",
+                ];
+            }
+
+            // The union's `fromJson` can't take null, since `JsonValue`
+            // can't hold it.
+            const nullMember = t.findMember("null");
+            const fromJson: Sourcelike = [
+                this.nameForNamedType(t),
+                ".fromJson(",
+                jsonValue,
+                ")",
+            ];
+            return nullMember === undefined
+                ? fromJson
+                : [
+                      "(if (",
+                      v,
+                      " == null) ",
+                      this.nameForNamedType(t),
+                      ".",
+                      this.nameForUnionMember(t, nullMember),
+                      "() else ",
+                      fromJson,
+                      ")",
+                  ];
+        }
+
+        return matchType<Sourcelike>(
+            t,
+            (_anyType) => v,
+            (_nullType) => [
+                "(if (",
+                v,
+                " == null) null else ",
+                orThrow("null"),
+                ")",
+            ],
+            (_boolType) => orThrow([v, " as? Boolean"]),
+            (_integerType) =>
+                orThrow(["(", v, " as? Int)?.toLong() ?: (", v, " as? Long)"]),
+            (_doubleType) =>
+                orThrow([
+                    "(",
+                    v,
+                    " as? Double) ?: (",
+                    v,
+                    " as? Int)?.toDouble() ?: (",
+                    v,
+                    " as? Long)?.toDouble()",
+                ]),
+            (_stringType) => orThrow([v, " as? String"]),
+            (arrayType) =>
+                orThrow([
+                    "(",
+                    v,
+                    " as? JsonArray<*>)?.map { ",
+                    element,
+                    " -> ",
+                    elementValue(arrayType.items),
+                    " }",
+                ]),
+            (classType) =>
+                orThrow(
+                    classType.getProperties().size === 0
+                        ? [v, " as? JsonObject"]
+                        : [
+                              "(",
+                              v,
+                              " as? JsonObject)?.let { klaxon.parseFromJsonObject<",
+                              this.nameForNamedType(classType),
+                              ">(it) }",
+                          ],
+                ),
+            (mapType) =>
+                orThrow([
+                    "(",
+                    v,
+                    " as? JsonObject)?.mapValues { (_, ",
+                    element,
+                    ") -> ",
+                    elementValue(mapType.values),
+                    " }",
+                ]),
+            (enumType) =>
+                orThrow([
+                    "(",
+                    v,
+                    " as? String)?.let { ",
+                    this.nameForNamedType(enumType),
+                    ".fromValue(it) }",
+                ]),
+            (_unionType) => mustNotHappen(),
+            (transformedStringType) => {
+                const parse =
+                    transformedStringType.kind === "date-time"
+                        ? "OffsetDateTime.parse(it)"
+                        : transformedStringType.kind === "date"
+                          ? "LocalDate.parse(it)"
+                          : transformedStringType.kind === "time"
+                            ? "OffsetTime.parse(it)"
+                            : "it";
+                return orThrow(["(", v, " as? String)?.let { ", parse, " }"]);
+            },
+            (tupleType) =>
+                orThrow([
+                    "(",
+                    v,
+                    " as? JsonArray<*>)?.let { ",
+                    this.nameForNamedType(tupleType),
+                    ".fromJson(JsonValue(it, null, null, klaxon)) }",
+                ]),
         );
     }
 
@@ -107,6 +290,7 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
             (_enumType) => "is String",
             (_unionType) => mustNotHappen(),
             (_transformedStringType) => "is String",
+            (_tupleType) => "is JsonArray<*>",
         );
     }
 
@@ -182,11 +366,16 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
             this.typeGraph.allNamedTypes(),
             (c) => c instanceof ClassType && c.getProperties().size === 0,
         );
+        const hasTuples = iterableSome(
+            this.typeGraph.allTypesUnordered(),
+            (t) => t instanceof TupleType,
+        );
         const usesDateTime = this.haveTransformedStringType("date-time");
         const usesDate = this.haveTransformedStringType("date");
         const usesTime = this.haveTransformedStringType("time");
         if (
             hasUnions ||
+            hasTuples ||
             this.haveEnums ||
             hasEmptyObjects ||
             usesDateTime ||
@@ -252,6 +441,14 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
                 [".convert(", name, "::class,"],
                 [" { ", name, ".fromJson(it) },"],
                 [" { it.toJson() }, true)"],
+            ]);
+        });
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (_, name) => {
+            converters.push([
+                [".convert(", name, "::class,"],
+                [" { ", name, ".fromJson(it) },"],
+                [" { it.toJson() })"],
             ]);
         });
 
@@ -394,6 +591,12 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
                         return ["(", v, " as String)"];
                 }
             },
+            (tupleType) => [
+                this.nameForNamedType(tupleType),
+                ".fromJson(JsonValue(",
+                v,
+                ", null, null, klaxon))",
+            ],
         );
     }
 
@@ -658,8 +861,11 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
                         emitValidation(
                             `${array} ${operator} ${bound}${p.isOptional ? ") }" : ")"}`,
                         );
+                    // A tuple's `fromJson` checks its length.
                     const [minItems, maxItems] =
-                        minMaxItemsForType(p.type) ?? [];
+                        p.type instanceof TupleType
+                            ? []
+                            : (minMaxItemsForType(p.type) ?? []);
                     if (minItems !== undefined) emitItems(">=", minItems);
                     if (maxItems !== undefined) emitItems("<=", maxItems);
                     const pattern = patternForType(p.type);
@@ -687,6 +893,126 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
         } else {
             this.emitLine(")");
         }
+    }
+
+    // A tuple is a JSON array: `toJson` writes the required items, the
+    // optional ones that are present, then the rest; `fromJson` converts
+    // each item, which fails for a value of another JSON type, and checks
+    // the array's length.
+    protected emitTupleDefinitionMethods(t: TupleType, tupleName: Name): void {
+        const properties = this.tupleProperties(t, tupleName);
+        const isTopLevel = iterableSome(
+            this.topLevels,
+            ([_, top]) => top === t,
+        );
+        const restProperty = properties.find((p) => p.kind === "rest");
+
+        this.emitBlock(")", () => {
+            if (this.emitTupleHolders(t, tupleName)) this.ensureBlankLine();
+            this.emitTupleToJson(
+                t,
+                tupleName,
+                "public fun toJson(): String",
+                (elements, isSum) => [
+                    isSum ? ["(", elements, ")"] : elements,
+                    '.joinToString(",", "[", "]") { if (it == null) "null" else klaxon.toJsonString(it) }',
+                ],
+            );
+
+            this.ensureBlankLine();
+            this.emitBlock("companion object", () => {
+                if (isTopLevel) {
+                    this.emitLine(
+                        "public fun fromJson(json: String): ",
+                        tupleName,
+                        " = fromJson(JsonValue(Parser().parse(StringBuilder(json)), null, null, klaxon))",
+                    );
+                    this.ensureBlankLine();
+                }
+
+                this.emitBlock(
+                    ["public fun fromJson(jv: JsonValue): ", tupleName],
+                    () => {
+                        const min = t.minItems;
+                        const max = t.items.length;
+                        const length =
+                            restProperty !== undefined
+                                ? min === 0
+                                    ? ""
+                                    : ` && a.size >= ${min}`
+                                : min === max
+                                  ? ` && a.size == ${max}`
+                                  : ` && a.size in ${min}..${max}`;
+                        this.emitLine("val a = jv.array");
+                        this.emitLine(
+                            "require(a != null",
+                            length,
+                            ') { "Cannot deserialize ',
+                            tupleName,
+                            ": expected ",
+                            expectedTupleLength(t),
+                            '" }',
+                        );
+                        this.emitLine("return ", tupleName, "(");
+                        this.indent(() => {
+                            properties.forEach((p, i) => {
+                                const comma =
+                                    i === properties.length - 1 ? "" : ",";
+                                const value = (): Sourcelike =>
+                                    this.tupleItemFromKlaxonValue(
+                                        p.type,
+                                        `a[${i}]`,
+                                        p.name,
+                                        tupleName,
+                                    );
+                                switch (p.kind) {
+                                    case "required":
+                                        this.emitLine(value(), comma);
+                                        break;
+                                    case "optional":
+                                        this.emitLine(
+                                            "if (a.size > ",
+                                            i.toString(),
+                                            ") ",
+                                            value(),
+                                            " else null",
+                                            comma,
+                                        );
+                                        break;
+                                    case "optional-nullable":
+                                        this.emitLine(
+                                            "if (a.size > ",
+                                            i.toString(),
+                                            ") ",
+                                            defined(p.holder),
+                                            "(",
+                                            value(),
+                                            ") else null",
+                                            comma,
+                                        );
+                                        break;
+                                    case "rest":
+                                        this.emitLine(
+                                            "(",
+                                            i.toString(),
+                                            " until a.size).map { i -> ",
+                                            this.tupleItemFromKlaxonValue(
+                                                p.type,
+                                                "a[i]",
+                                                "an item of the rest",
+                                                tupleName,
+                                            ),
+                                            " }",
+                                        );
+                                        break;
+                                }
+                            });
+                        });
+                        this.emitLine(")");
+                    },
+                );
+            });
+        });
     }
 
     protected renameAttribute(

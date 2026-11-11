@@ -13,6 +13,7 @@ import { TargetLanguage } from "../../TargetLanguage.js";
 import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
+    TupleSupport,
 } from "../../Type/index.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
@@ -66,6 +67,13 @@ export class KotlinTargetLanguage extends TargetLanguage<
 
     public get supportsRecursiveUnions(): boolean {
         return true;
+    }
+
+    // A tuple is a data class with a property per item, read from and
+    // written to a JSON array by hand-written code for each framework,
+    // which also handles optional items and a rest.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     public get stringTypeMapping(): StringTypeMapping {

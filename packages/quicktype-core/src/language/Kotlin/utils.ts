@@ -1,5 +1,5 @@
 import { DefaultDateTimeRecognizer } from "../../DateTime.js";
-import type { Type } from "../../Type/index.js";
+import { TupleType, type Type } from "../../Type/index.js";
 
 import {
     allLowerWordStyle,
@@ -125,6 +125,8 @@ export class KotlinDateTimeRecognizer extends DefaultDateTimeRecognizer {
 // (e.g. date, time and enum values are all strings), parse attempts must be
 // ordered strictest first: transformed string types (strict ISO parsers),
 // then enums (known values only), then plain strings (accept anything).
+// Likewise for JSON arrays: tuples, those that take fewer lengths first,
+// then the array.
 export function unionMemberMatchPriority(t: Type): number {
     if (t.kind === "date-time" || t.kind === "date" || t.kind === "time") {
         return 0;
@@ -138,5 +140,33 @@ export function unionMemberMatchPriority(t: Type): number {
         return 2;
     }
 
+    if (t instanceof TupleType) {
+        return t.rest === undefined
+            ? 3 + t.items.length - t.minItems
+            : Number.MAX_SAFE_INTEGER - 1;
+    }
+
+    if (t.kind === "array") {
+        return Number.MAX_SAFE_INTEGER;
+    }
+
     return 3;
+}
+
+function elements(n: number): string {
+    return n === 1 ? "1 element" : `${n} elements`;
+}
+
+// What a tuple's JSON array must look like, for error messages.
+export function expectedTupleLength(t: TupleType): string {
+    const min = t.minItems;
+    const max = t.items.length;
+    if (t.rest !== undefined) {
+        return min === 0 ? "an array" : `an array of at least ${elements(min)}`;
+    }
+
+    if (min === max) return `an array of ${elements(max)}`;
+    return min === 0
+        ? `an array of at most ${elements(max)}`
+        : `an array of ${min} to ${max} elements`;
 }
