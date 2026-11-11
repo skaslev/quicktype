@@ -611,27 +611,32 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
             const converter = this.converterForType(targetType);
             if (converter !== undefined) {
                 const typeSource = this.csType(targetType);
+                // The converter is for the non-null type, so if the target
+                // type is nullable we have to handle null ourselves.  The
+                // non-null type is also the one to pass it: `typeof` doesn't
+                // take a nullable reference type like `string?` (CS8639).
+                const nonNull =
+                    targetType instanceof UnionType
+                        ? nullableFromUnion(targetType)
+                        : null;
+                const converterType =
+                    nonNull === null ? typeSource : this.csType(nonNull);
                 this.emitLine(
                     "var converter = ",
                     this.converterObject(converter),
                     ";",
                 );
-                // The converter is for the non-null type, so if the target
-                // type is nullable we have to handle null ourselves.
-                const isNullable =
-                    targetType instanceof UnionType &&
-                    nullableFromUnion(targetType) !== null;
                 this.emitLine(
                     "var ",
                     variableName,
                     " = ",
-                    isNullable
+                    nonNull !== null
                         ? "reader.TokenType == JsonTokenType.Null ? null : "
                         : "",
                     "(",
                     typeSource,
                     ")converter.Read(ref reader, typeof(",
-                    typeSource,
+                    converterType,
                     "), options);",
                 );
             } else if (source.kind !== "null") {

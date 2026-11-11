@@ -587,6 +587,15 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
             const converter = this.converterForType(targetType);
             if (converter !== undefined) {
                 const typeSource = this.csType(targetType);
+                // The converter is for the non-null type.  That's also the
+                // type to pass it: `typeof` doesn't take a nullable
+                // reference type like `string?` (CS8639).
+                const nonNull =
+                    targetType instanceof UnionType
+                        ? nullableFromUnion(targetType)
+                        : null;
+                const converterType =
+                    nonNull === null ? typeSource : this.csType(nonNull);
                 this.emitLine(
                     "var converter = ",
                     this.converterObject(converter),
@@ -598,7 +607,7 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
                     " = (",
                     typeSource,
                     ")converter.ReadJson(reader, typeof(",
-                    typeSource,
+                    converterType,
                     "), null, serializer);",
                 );
             } else if (source.kind !== "null") {
