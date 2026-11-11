@@ -958,10 +958,23 @@ export class DartRenderer extends ConvenienceRenderer {
 
     protected emitEnumDefinition(e: EnumType, enumName: Name): void {
         this.emitDescription(this.descriptionForType(e));
+        // Hive can only store the classes' enum properties with an adapter
+        // for the enum, too.
+        if (this._options.useHive) {
+            this.classCounter++;
+            this.emitLine(`@HiveType(typeId: ${this.classCounter})`);
+            this.classPropertyCounter = 0;
+        }
+
         this.emitLine("enum ", enumName, " {");
         this.indent(() => {
             this.forEachEnumCase(e, "none", (name, jsonName, pos) => {
                 const comma = pos === "first" || pos === "middle" ? "," : [];
+                if (this._options.useHive) {
+                    this.classPropertyCounter++;
+                    this.emitLine(`@HiveField(${this.classPropertyCounter})`);
+                }
+
                 if (this._options.useJsonAnnotation) {
                     this.emitLine('@JsonValue("', stringEscape(jsonName), '")');
                 }
