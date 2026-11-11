@@ -27,6 +27,11 @@ export const forbiddenNames = [
     "List",
     "Dict",
     "Maybe",
+    // Elm's default imports that the generated code uses: a type or an
+    // enum case of the same name would take their place.
+    "Just",
+    "Nothing",
+    "Bool",
     "makeNullableEncoder",
     "optionalField",
     // Parameter names used in generated functions.  Elm 0.19 does not
