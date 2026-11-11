@@ -13,7 +13,12 @@ import {
     nullableFromUnion,
     removeNullFromUnion,
 } from "../../Type/TypeUtils.js";
-import type { ClassType, EnumType, Type, UnionType } from "../../Type/index.js";
+import {
+    type ClassType,
+    type EnumType,
+    type Type,
+    UnionType,
+} from "../../Type/index.js";
 
 import { keywords } from "./constants.js";
 import {
@@ -62,6 +67,22 @@ export class CrystalRenderer extends ConvenienceRenderer {
         _enumName: Name,
     ): ForbiddenWordsInfo {
         return { names: [], includeGlobalForbidden: true };
+    }
+
+    // A union's alias leaves out Nil, which references add back with `?`,
+    // so a top-level union with null doesn't take the top-level name: the
+    // top-level is an alias that adds the Nil, `alias TopLevel =
+    // TopLevelUnion?`.  A union of null and a single type has no alias of
+    // its own at all.
+    protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
+        if (
+            type instanceof UnionType &&
+            removeNullFromUnion(type)[0] !== null
+        ) {
+            return undefined;
+        }
+
+        return super.namedTypeToNameForTopLevel(type);
     }
 
     protected get commentLineStart(): string {
