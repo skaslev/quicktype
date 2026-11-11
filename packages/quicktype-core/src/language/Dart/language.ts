@@ -9,6 +9,7 @@ import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
+    TupleSupport,
 } from "../../Type/index.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
@@ -92,6 +93,12 @@ export class DartTargetLanguage extends TargetLanguage<
 
     public get supportsRecursiveUnions(): boolean {
         return true;
+    }
+
+    // Tuples are classes with a field per item, which read and write JSON
+    // arrays in their `fromJson` and `toJson`.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     public get stringTypeMapping(): StringTypeMapping {

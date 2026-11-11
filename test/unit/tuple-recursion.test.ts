@@ -78,8 +78,7 @@ describe("targets that declare recursive unions", () => {
     // unions that contain each other through arrays.
     test.each([
         ["pike", ["typedef Leaf|array(TopLevelNode) PurpleNode;"]],
-        // Unions are `dynamic` and `id`, but the leaves' class is declared.
-        ["dart", ["class Leaf {"]],
+        // Unions are `id`, but the leaves' class is declared.
         ["objective-c", ["@interface QTLeaf : NSObject"]],
     ] as const)("%s keeps a tuple's reference to itself", async (lang, expected) => {
         const output = await renderSchema(lang, tree, justTypes);

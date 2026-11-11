@@ -1,3 +1,5 @@
+import { iterableFirst } from "collection-utils";
+
 import {
     anyTypeIssueAnnotation,
     nullTypeIssueAnnotation,
@@ -17,17 +19,18 @@ import type { RenderContext } from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated, modifySource } from "../../Source.js";
 import { decapitalize, snakeCase } from "../../support/Strings.js";
-import { defined } from "../../support/Support.js";
+import { assert, defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
     type ClassProperty,
     type ClassType,
     EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import {
-    directlyReachableSingleNamedType,
+    directlyReachableTypes,
     isNamedType,
     matchType,
     nullableFromUnion,
@@ -55,6 +58,8 @@ export class DartRenderer extends ConvenienceRenderer {
 
     private _needEnumValues = false;
 
+    private _needPresent = false;
+
     private classCounter = 0;
 
     private classPropertyCounter = 0;
@@ -72,7 +77,11 @@ export class DartRenderer extends ConvenienceRenderer {
     }
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
-        return keywords;
+        // `Present` holds optional tuple items that can be null.
+        const needsPresent = Array.from(
+            this.typeGraph.allTypesUnordered(),
+        ).some((t) => t instanceof TupleType && this.tupleNeedsPresent(t));
+        return needsPresent ? [...keywords, "Present"] : keywords;
     }
 
     protected forbiddenForObjectProperties(
@@ -111,21 +120,42 @@ export class DartRenderer extends ConvenienceRenderer {
         return nullableFromUnion(u) === null;
     }
 
+    // Every tuple is a class with a field per item.  Dart 3's records would
+    // need a newer SDK than the Dart 2 this output supports, and couldn't
+    // read themselves from JSON anyway.
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return true;
+    }
+
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
         if (this._options.justTypes) {
-            // Only classes and enums are declared under the top-level name;
-            // everything else (including unions, which Dart doesn't render)
-            // gets a typedef, so e.g. a nullable class top-level becomes
-            // `typedef TopLevel = Class?;` rather than naming the class.
-            return isNamedType(type) && !(type instanceof UnionType)
+            // Only classes, enums and tuples are declared under the
+            // top-level name; everything else (including unions, which Dart
+            // doesn't render) gets a typedef, so e.g. a nullable class
+            // top-level becomes `typedef TopLevel = Class?;` rather than
+            // naming the class.
+            return (isNamedType(type) && !(type instanceof UnionType)) ||
+                type instanceof TupleType
                 ? type
                 : undefined;
         }
 
         // If the top-level type doesn't contain any classes or unions
         // we have to define a class just for the `FromJson` method, in
-        // emitFromJsonForTopLevel.
-        return directlyReachableSingleNamedType(type);
+        // emitFromJsonForTopLevel.  Tuples are classes, too: the named
+        // types in their items aren't reachable directly.
+        const definedTypes = directlyReachableTypes(type, (t) => {
+            const isDefined =
+                t instanceof UnionType
+                    ? nullableFromUnion(t) === null
+                    : t instanceof TupleType || isNamedType(t);
+            return isDefined ? new Set([t]) : null;
+        });
+        assert(
+            definedTypes.size <= 1,
+            "Cannot have more than one defined type per top-level",
+        );
+        return iterableFirst(definedTypes);
     }
 
     protected get toJson(): string {
@@ -341,6 +371,7 @@ export class DartRenderer extends ConvenienceRenderer {
                         return withNullable("String");
                 }
             },
+            (tupleType) => withNullable(this.nameForNamedType(tupleType)),
         );
     }
 
@@ -406,7 +437,7 @@ export class DartRenderer extends ConvenienceRenderer {
 
     protected mapClass(
         isNullable: boolean,
-        classType: ClassType,
+        classType: ClassType | TupleType,
         dynamic: Sourcelike,
     ): Sourcelike {
         if (isNullable && !this._options.requiredProperties) {
@@ -579,6 +610,7 @@ export class DartRenderer extends ConvenienceRenderer {
                         return dynamic;
                 }
             },
+            (tupleType) => this.mapClass(isNullable, tupleType, dynamic),
         );
     }
 
@@ -611,16 +643,7 @@ export class DartRenderer extends ConvenienceRenderer {
                         "x",
                     ),
                 ),
-            (_classType) => {
-                if (
-                    (_classType.isNullable || isNullable) &&
-                    !this._options.requiredProperties
-                ) {
-                    return [dynamic, "?.", this.toJson, "()"];
-                }
-
-                return [dynamic, ".", this.toJson, "()"];
-            },
+            (classType) => this.toJsonOfClass(isNullable, classType, dynamic),
             (mapType) =>
                 this.mapMap(
                     mapType.isNullable || isNullable,
@@ -695,7 +718,20 @@ export class DartRenderer extends ConvenienceRenderer {
                         return dynamic;
                 }
             },
+            (tupleType) => this.toJsonOfClass(isNullable, tupleType, dynamic),
         );
+    }
+
+    private toJsonOfClass(
+        isNullable: boolean,
+        t: ClassType | TupleType,
+        dynamic: Sourcelike,
+    ): Sourcelike {
+        if ((t.isNullable || isNullable) && !this._options.requiredProperties) {
+            return [dynamic, "?.", this.toJson, "()"];
+        }
+
+        return [dynamic, ".", this.toJson, "()"];
     }
 
     private _emitEmptyConstructor(className: Name): void {
@@ -975,6 +1011,362 @@ export class DartRenderer extends ConvenienceRenderer {
         );
     }
 
+    /**
+     * Whether an optional item of a tuple can be null.  Such an item is a
+     * `Present`, which keeps a missing item (null) apart from a null one
+     * (`Present(null)`).
+     */
+    private tupleItemNeedsPresent(t: TupleType, i: number): boolean {
+        return i >= t.minItems && t.items[i].isNullable;
+    }
+
+    private tupleNeedsPresent(t: TupleType): boolean {
+        return t.items.some((_, i) => this.tupleItemNeedsPresent(t, i));
+    }
+
+    /**
+     * A field `itemN` per tuple item, and `rest` for the rest.  An optional
+     * item is null if it's missing.
+     */
+    private tupleFields(
+        t: TupleType,
+    ): Array<{ name: string; type: Sourcelike; required: boolean }> {
+        const fields = t.items.map((item, i) => {
+            const name = `item${i}`;
+            if (i < t.minItems) {
+                return {
+                    name,
+                    type: this.dartType(item, true),
+                    required: true,
+                };
+            }
+
+            const type = this.tupleItemNeedsPresent(t, i)
+                ? ["Present<", this.dartType(item, true), ">?"]
+                : this.dartType(item, true, true);
+            return { name, type, required: false };
+        });
+        if (t.rest !== undefined) {
+            fields.push({
+                name: "rest",
+                type: ["List<", this.dartType(t.rest, true), ">"],
+                required: true,
+            });
+        }
+
+        return fields;
+    }
+
+    /** The bounds of a tuple's length; `max` is undefined with a rest. */
+    private tupleLengthBounds(t: TupleType): [number, number | undefined] {
+        const [minConstraint, maxConstraint] = minMaxItemsForType(t) ?? [];
+        const min = Math.max(t.minItems, minConstraint ?? 0);
+        if (t.rest === undefined) return [min, t.items.length];
+        return [min, maxConstraint];
+    }
+
+    private emitTupleFromJson(t: TupleType, tupleName: Name): void {
+        const [min, max] = this.tupleLengthBounds(t);
+        const conditions: string[] = [];
+        if (min === max) {
+            conditions.push(`json.length != ${min}`);
+        } else {
+            if (min > 0) conditions.push(`json.length < ${min}`);
+            if (max !== undefined) conditions.push(`json.length > ${max}`);
+        }
+        const count =
+            max === undefined
+                ? `at least ${min}`
+                : min === max
+                  ? `${min}`
+                  : `${min} to ${max}`;
+        const elements =
+            min === 1 && (max === undefined || max === 1)
+                ? "element"
+                : "elements";
+
+        this.emitBlock(
+            ["factory ", tupleName, ".", this.fromJson, "(List<dynamic> json)"],
+            () => {
+                if (conditions.length > 0) {
+                    this.emitBlock(["if (", conditions.join(" || "), ")"], () =>
+                        this.emitLine(
+                            'throw FormatException("Expected ',
+                            count,
+                            " ",
+                            elements,
+                            " for ",
+                            tupleName,
+                            '");',
+                        ),
+                    );
+                }
+
+                this.emitLine("return ", tupleName, "(");
+                this.indent(() => {
+                    t.items.forEach((item, i) => {
+                        const element = `json[${i}]`;
+                        if (i < t.minItems) {
+                            this.emitLine(
+                                `item${i}: `,
+                                this.fromDynamicExpression(
+                                    item.isNullable,
+                                    item,
+                                    element,
+                                ),
+                                ",",
+                            );
+                        } else if (this.tupleItemNeedsPresent(t, i)) {
+                            this.emitLine(
+                                `item${i}: json.length > ${i} ? Present<`,
+                                this.dartType(item),
+                                ">(",
+                                this.fromDynamicExpression(true, item, element),
+                                ") : null,",
+                            );
+                        } else {
+                            // The item is null if it's missing, so a null
+                            // element must not get there.
+                            const nonNull = [
+                                "(",
+                                element,
+                                ` ?? (throw FormatException("Item ${i} of `,
+                                tupleName,
+                                ` can't be null"))`,
+                                ")",
+                            ];
+                            this.emitLine(
+                                `item${i}: json.length > ${i} ? `,
+                                this.fromDynamicExpression(
+                                    false,
+                                    item,
+                                    nonNull,
+                                ),
+                                " : null,",
+                            );
+                        }
+                    });
+                    const rest = t.rest;
+                    if (rest !== undefined) {
+                        this.emitLine(
+                            "rest: List<",
+                            this.dartType(rest),
+                            `>.from(json.skip(${t.items.length}).map((x) => `,
+                            this.fromDynamicExpression(
+                                rest.isNullable,
+                                rest,
+                                "x",
+                            ),
+                            ")),",
+                        );
+                    }
+                });
+                this.emitLine(");");
+            },
+        );
+    }
+
+    /**
+     * An item may only follow an optional item that is present: a JSON
+     * array can't leave a gap.
+     */
+    private tupleGapCondition(t: TupleType): string | undefined {
+        const conditions: string[] = [];
+        for (let i = t.minItems + 1; i < t.items.length; i++) {
+            conditions.push(`item${i - 1} == null && item${i} != null`);
+        }
+
+        if (t.rest !== undefined && t.minItems < t.items.length) {
+            conditions.push(
+                `item${t.items.length - 1} == null && rest.isNotEmpty`,
+            );
+        }
+
+        if (conditions.length <= 1) return conditions[0];
+        return conditions.map((c) => `(${c})`).join(" || ");
+    }
+
+    /**
+     * Writes the required items, the optional ones that are present, then
+     * the rest.
+     */
+    private emitTupleToJson(t: TupleType, tupleName: Name): void {
+        const emitElements = (): void => {
+            this.indent(() => {
+                t.items.forEach((item, i) => {
+                    if (i < t.minItems) {
+                        this.emitLine(
+                            this.toDynamicExpression(
+                                item.isNullable,
+                                item,
+                                `item${i}`,
+                            ),
+                            ",",
+                        );
+                        return;
+                    }
+
+                    const value = this.tupleItemNeedsPresent(t, i)
+                        ? this.toDynamicExpression(
+                              true,
+                              item,
+                              `item${i}!.value`,
+                          )
+                        : this.toDynamicExpression(false, item, `item${i}!`);
+                    this.emitLine(`if (item${i} != null) `, value, ",");
+                });
+                const rest = t.rest;
+                if (rest !== undefined) {
+                    const value = this.toDynamicExpression(
+                        rest.isNullable,
+                        rest,
+                        "x",
+                    );
+                    this.emitLine(
+                        this.sourcelikeToString(value) === "x"
+                            ? "...rest"
+                            : ["...rest.map((x) => ", value, ")"],
+                        ",",
+                    );
+                }
+            });
+        };
+
+        const gap = this.tupleGapCondition(t);
+        if (gap === undefined) {
+            this.emitLine("List<dynamic> ", this.toJson, "() => [");
+            emitElements();
+            this.emitLine("];");
+            return;
+        }
+
+        this.emitBlock(["List<dynamic> ", this.toJson, "()"], () => {
+            this.emitBlock(["if (", gap, ")"], () =>
+                this.emitLine(
+                    'throw StateError("An item of ',
+                    tupleName,
+                    ' follows a missing optional item");',
+                ),
+            );
+            this.emitLine("return [");
+            emitElements();
+            this.emitLine("];");
+        });
+    }
+
+    /**
+     * A tuple is a class with a field per item (see `tupleFields`), which
+     * reads itself from a JSON array and writes itself back.  It's a plain
+     * class also with `--use-freezed` and `--use-json-annotation`, whose
+     * generated code reads JSON objects only; theirs calls the tuple's
+     * `fromJson` and `toJson`.
+     */
+    protected emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        if (this._options.useHive) {
+            this.classCounter++;
+            this.emitLine(`@HiveType(typeId: ${this.classCounter})`);
+            this.classPropertyCounter = 0;
+        }
+
+        if (this.tupleNeedsPresent(t)) {
+            this._needPresent = true;
+        }
+
+        const fields = this.tupleFields(t);
+        this.emitBlock(["class ", tupleName], () => {
+            for (const { name, type } of fields) {
+                if (this._options.useHive) {
+                    this.classPropertyCounter++;
+                    this.emitLine(`@HiveField(${this.classPropertyCounter})`);
+                }
+
+                this.emitLine(
+                    this._options.finalProperties ? "final " : "",
+                    type,
+                    " ",
+                    name,
+                    ";",
+                );
+            }
+
+            this.ensureBlankLine();
+            this.emitLine(tupleName, "({");
+            this.indent(() => {
+                for (const { name, required } of fields) {
+                    this.emitLine(
+                        required || this._options.requiredProperties
+                            ? "required "
+                            : "",
+                        "this.",
+                        name,
+                        ",",
+                    );
+                }
+            });
+            this.emitLine("});");
+
+            if (this._options.generateCopyWith) {
+                this.ensureBlankLine();
+                this.emitLine(tupleName, " copyWith({");
+                this.indent(() => {
+                    t.items.forEach((item, i) => {
+                        const type = this.tupleItemNeedsPresent(t, i)
+                            ? fields[i].type
+                            : this.dartType(item, true, true);
+                        this.emitLine(type, " ", fields[i].name, ",");
+                    });
+                    if (t.rest !== undefined) {
+                        this.emitLine(
+                            "List<",
+                            this.dartType(t.rest, true),
+                            ">? rest,",
+                        );
+                    }
+                });
+                this.emitLine("}) => ");
+                this.indent(() => {
+                    this.emitLine(tupleName, "(");
+                    this.indent(() => {
+                        for (const { name } of fields) {
+                            this.emitLine(
+                                name,
+                                ": ",
+                                name,
+                                " ?? this.",
+                                name,
+                                ",",
+                            );
+                        }
+                    });
+                    this.emitLine(");");
+                });
+            }
+
+            if (this._options.justTypes) return;
+
+            if (this._options.codersInClass) {
+                this._emitStringJsonEncoderDecoder(tupleName);
+            }
+
+            this.ensureBlankLine();
+            this.emitTupleFromJson(t, tupleName);
+            this.ensureBlankLine();
+            this.emitTupleToJson(t, tupleName);
+        });
+    }
+
+    protected emitPresent(): void {
+        this.ensureBlankLine();
+        this.emitMultiline(`/// An optional tuple item that is there, even if it's null.  A missing
+/// item is null.
+class Present<T> {
+    final T value;
+
+    const Present(this.value);
+}`);
+    }
+
     protected emitEnumDefinition(e: EnumType, enumName: Name): void {
         this.emitDescription(this.descriptionForType(e));
         // Hive can only store the classes' enum properties with an adapter
@@ -1103,10 +1495,15 @@ export class DartRenderer extends ConvenienceRenderer {
             (_e, _n) => {
                 // We don't support this yet.
             },
+            (t, n) => this.emitTupleDefinition(t, n),
         );
 
         if (this._needEnumValues) {
             this.emitEnumValues();
+        }
+
+        if (this._needPresent) {
+            this.emitPresent();
         }
     }
 }
