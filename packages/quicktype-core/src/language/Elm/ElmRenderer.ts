@@ -27,7 +27,7 @@ import { defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
     type ClassProperty,
-    type ClassType,
+    ClassType,
     EnumType,
     type Type,
     UnionType,
@@ -58,6 +58,8 @@ export class ElmRenderer extends ConvenienceRenderer {
 
     private readonly _namedTypeDependents = new Map<Name, NamedTypeDependent>();
 
+    private readonly _classIsCustomType = new Map<ClassType, boolean>();
+
     public constructor(
         targetLanguage: TargetLanguage,
         renderContext: RenderContext,
@@ -67,7 +69,68 @@ export class ElmRenderer extends ConvenienceRenderer {
     }
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
-        return forbiddenNames;
+        // The parameters of the custom type records' decoders, `x0`, `x1`,
+        // ...: Elm doesn't allow a parameter to shadow a top-level
+        // definition.
+        const arity = Math.max(
+            0,
+            ...Array.from(this.typeGraph.allTypesUnordered())
+                .filter(
+                    (t): t is ClassType =>
+                        t instanceof ClassType && this.classIsCustomType(t),
+                )
+                .map((c) => c.getProperties().size),
+        );
+        return [
+            ...forbiddenNames,
+            ...Array.from({ length: arity }, (_, i) => `x${i}`),
+        ];
+    }
+
+    /**
+     * Whether a class is a custom type wrapping its record,
+     * `type A = A { ... }`, instead of a type alias for the record.  Elm
+     * doesn't allow a type alias to refer to itself, other than through a
+     * custom type, so a class that contains itself through records,
+     * lists, dicts and `Maybe`s only is a custom type.
+     */
+    private classIsCustomType(c: ClassType): boolean {
+        let result = this._classIsCustomType.get(c);
+        if (result !== undefined) return result;
+
+        const isCustomType = (t: Type): boolean =>
+            t instanceof EnumType ||
+            (t instanceof UnionType && nullableFromUnion(t) === null);
+        const seen = new Set<Type>();
+        const work = Array.from(c.getNonAttributeChildren());
+        result = false;
+        for (let t = work.pop(); t !== undefined; t = work.pop()) {
+            if (t === c) {
+                result = true;
+                break;
+            }
+
+            if (seen.has(t) || isCustomType(t)) continue;
+            seen.add(t);
+            work.push(...t.getNonAttributeChildren());
+        }
+
+        this._classIsCustomType.set(c, result);
+        return result;
+    }
+
+    // Whether `t` is `target` or contains it.
+    private containsType(t: Type, target: Type): boolean {
+        const seen = new Set<Type>();
+        const work = [t];
+        for (let c = work.pop(); c !== undefined; c = work.pop()) {
+            if (c === target) return true;
+            if (seen.has(c)) continue;
+            seen.add(c);
+            work.push(...c.getNonAttributeChildren());
+        }
+
+        return false;
     }
 
     protected makeTopLevelDependencyNames(
@@ -407,24 +470,37 @@ export class ElmRenderer extends ConvenienceRenderer {
         });
 
         this.emitDescription(description);
-        this.emitLine("type alias ", className, " =");
+        const wrapped = this.classIsCustomType(c);
+        if (wrapped) {
+            this.emitLine("type ", className, " =");
+        } else {
+            this.emitLine("type alias ", className, " =");
+        }
         this.indent(() => {
-            let onFirst = true;
-            this.forEachClassProperty(c, "none", (name, _jsonName, p) => {
-                this.emitLine(
-                    onFirst ? "{" : ",",
-                    " ",
-                    name,
-                    " : ",
-                    this.elmProperty(p),
-                );
-                onFirst = false;
-            });
-            if (onFirst) {
-                this.emitLine("{");
+            if (wrapped) {
+                this.emitLine(className);
             }
+            const indent = wrapped
+                ? (f: () => void): void => this.indent(f)
+                : (f: () => void): void => f();
+            indent(() => {
+                let onFirst = true;
+                this.forEachClassProperty(c, "none", (name, _jsonName, p) => {
+                    this.emitLine(
+                        onFirst ? "{" : ",",
+                        " ",
+                        name,
+                        " : ",
+                        this.elmProperty(p),
+                    );
+                    onFirst = false;
+                });
+                if (onFirst) {
+                    this.emitLine("{");
+                }
 
-            this.emitLine("}");
+                this.emitLine("}");
+            });
         });
     }
 
@@ -489,6 +565,7 @@ export class ElmRenderer extends ConvenienceRenderer {
     }
 
     private emitClassFunctions(c: ClassType, className: Name): void {
+        const wrapped = this.classIsCustomType(c);
         const decoderName = this.decoderNameForNamedType(c);
         this.emitLine(decoderName, " : Jdec.Decoder ", className);
         this.emitLine(decoderName, " =");
@@ -501,12 +578,45 @@ export class ElmRenderer extends ConvenienceRenderer {
                 );
                 return;
             }
-            this.emitLine("Jdec.succeed ", className);
+            if (wrapped) {
+                // A function of the properties that wraps their record.
+                const parameters: string[] = [];
+                const fields: Sourcelike[] = [];
+                this.forEachClassProperty(c, "none", (name) => {
+                    const x = `x${parameters.length}`;
+                    fields.push([
+                        fields.length === 0 ? "{ " : ", ",
+                        name,
+                        " = ",
+                        x,
+                    ]);
+                    parameters.push(x);
+                });
+                this.emitLine(
+                    "Jdec.succeed (\\",
+                    parameters.join(" "),
+                    " -> ",
+                    className,
+                    " ",
+                    fields,
+                    " })",
+                );
+            } else {
+                this.emitLine("Jdec.succeed ", className);
+            }
             this.indent(() => {
                 this.forEachClassProperty(c, "none", (_, jsonName, p) => {
-                    const propDecoder = parenIfNeeded(
-                        this.decoderNameForProperty(p),
-                    );
+                    // Elm rejects a value that is defined in terms of
+                    // itself, so a property that contains the record is
+                    // decoded lazily (also through a union, which breaks
+                    // the cycle of types but not of decoders).
+                    const propDecoder = this.containsType(p.type, c)
+                        ? [
+                              "(Jdec.lazy (\\_ -> ",
+                              this.decoderNameForProperty(p).source,
+                              "))",
+                          ]
+                        : parenIfNeeded(this.decoderNameForProperty(p));
                     const { reqOrOpt, fallback } = requiredOrOptional(p);
                     if (reqOrOpt.endsWith("optional")) {
                         this.emitLine([
@@ -535,7 +645,11 @@ export class ElmRenderer extends ConvenienceRenderer {
 
         const encoderName = this.encoderNameForNamedType(c);
         this.emitLine(encoderName, " : ", className, " -> Jenc.Value");
-        this.emitLine(encoderName, " x =");
+        if (wrapped) {
+            this.emitLine(encoderName, " (", className, " x) =");
+        } else {
+            this.emitLine(encoderName, " x =");
+        }
         this.indent(() => {
             this.emitLine("Jenc.object");
             this.indent(() => {
@@ -690,11 +804,13 @@ export class ElmRenderer extends ConvenienceRenderer {
             }
 
             topLevelDecoders.push(decoder);
-            // A top-level enum or union is a custom type: expose its
-            // constructors, as for the other enums and unions.
+            // A top-level custom type, an enum, a union or a record that
+            // contains itself, exposes its constructors, as the other
+            // custom types do.
             const isCustomType =
                 t instanceof EnumType ||
-                (t instanceof UnionType && nullableFromUnion(t) === null);
+                (t instanceof UnionType && nullableFromUnion(t) === null) ||
+                (t instanceof ClassType && this.classIsCustomType(t));
             exports.push(
                 isCustomType ? [name, "(..)"] : name,
                 encoder,
@@ -702,7 +818,8 @@ export class ElmRenderer extends ConvenienceRenderer {
             );
         });
         this.forEachObject("none", (t: ClassType, name: Name) => {
-            if (!mapContains(this.topLevels, t)) exports.push(name);
+            if (mapContains(this.topLevels, t)) return;
+            exports.push(this.classIsCustomType(t) ? [name, "(..)"] : name);
         });
         this.forEachEnum("none", (t, name) => {
             if (!mapContains(this.topLevels, t)) exports.push([name, "(..)"]);
