@@ -344,6 +344,11 @@ class Run implements RunContext {
                             debugPrintReconstitution,
                         );
                     });
+
+                    // The new intersections can have unions to flatten
+                    // first, of the types of a property of several object
+                    // types, for example.
+                    if (!intersectionsDone) unionsDone = false;
                 }
 
                 if (!unionsDone) {

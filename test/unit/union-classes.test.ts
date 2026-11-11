@@ -276,6 +276,35 @@ describe("unions unify classes", () => {
         );
     });
 
+    // Unifying the classes unifies the types of their properties, which
+    // the intersection then intersects.
+    test("intersected with another object, with property types to unify", async () => {
+        const output = await renderSchema({
+            allOf: [
+                closedObject(
+                    { c: { type: "string" }, d: { type: "integer" } },
+                    ["d"],
+                ),
+                { oneOf: [{ $ref: "#/$defs/C" }, { $ref: "#/$defs/E" }] },
+            ],
+            $defs: {
+                C: closedObject(
+                    { c: { type: "string" }, d: { type: "integer" } },
+                    ["c"],
+                ),
+                E: closedObject({ c: { enum: ["x", "y"] } }, []),
+            },
+        });
+        expect(output).toContain(
+            [
+                "export interface TopLevel {",
+                "    c?: string;",
+                "    d:  number;",
+                "}",
+            ].join("\n"),
+        );
+    });
+
     test("from JSON samples", async () => {
         const jsonInput = jsonInputForTargetLanguage(
             new TypeScriptWithUnionClasses(),
