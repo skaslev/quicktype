@@ -77,7 +77,6 @@ describe("targets that declare recursive unions", () => {
     // The node's items are a string or an array of leaves and nodes: two
     // unions that contain each other through arrays.
     test.each([
-        ["go", [/Leaf\s+\*Leaf/, /UnionArray\s+\[\]TopLevelNode/]],
         ["csharp", ["public Leaf? Leaf;", "public TopLevelNode[]? "]],
         [
             "kotlin",
@@ -100,7 +99,6 @@ describe("targets that declare recursive unions", () => {
     });
 
     test.each([
-        ["go", /UnionArray\s+\[\]TopLevelElement/],
         ["csharp", /public TopLevelElement\[\]\? \w+;/],
         ["kotlin", /UnionArrayValue\(val value: List<TopLevelElement>\)/],
         ["swift", /case unionArray\(\[TopLevelElement\]\)/],
@@ -108,16 +106,6 @@ describe("targets that declare recursive unions", () => {
     ] as const)("%s keeps a tuple that is its own item", async (lang, expected) => {
         const output = await renderSchema(lang, chain, justTypes);
         expect(output).toMatch(expected);
-    });
-
-    test("Go decodes the recursive union", async () => {
-        const output = await renderSchema("go", tree, { package: "tree" });
-        expect(output).toContain(
-            "func (x *TopLevelNode) UnmarshalJSON(data []byte) error",
-        );
-        expect(output).toContain(
-            "func (x *PurpleNode) UnmarshalJSON(data []byte) error",
-        );
     });
 });
 

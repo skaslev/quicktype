@@ -41,6 +41,7 @@ export function isValueType(t: Type): boolean {
     return (
         primitiveValueTypeKinds.includes(kind) ||
         kind === "class" ||
+        kind === "tuple" ||
         kind === "enum" ||
         kind === "date-time"
     );

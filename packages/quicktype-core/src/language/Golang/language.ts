@@ -5,6 +5,7 @@ import {
     getOptionValues,
 } from "../../RendererOptions/index.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type {
     PrimitiveStringTypeKind,
@@ -88,6 +89,12 @@ export class GoTargetLanguage extends TargetLanguage<
 
     public get supportsOptionalClassProperties(): boolean {
         return true;
+    }
+
+    // Tuples are structs with a field per item, which read and write JSON
+    // arrays in their MarshalJSON and UnmarshalJSON methods.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "go">(

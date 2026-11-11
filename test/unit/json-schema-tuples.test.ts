@@ -61,13 +61,15 @@ describe("targets without tuples", () => {
     });
 
     test("get an array of the union of the item types", async () => {
-        const output = await renderSchema("go", pair, justTypes);
-        expect(output).toContain("type TopLevel []TopLevelElement");
+        const output = await renderSchema("kotlin", pair, justTypes);
+        expect(output).toContain(
+            "typealias TopLevel = ArrayList<TopLevelElement>",
+        );
     });
 
     test("include draft-07 additionalItems in that union", async () => {
         const output = await renderSchema(
-            "go",
+            "kotlin",
             {
                 type: "array",
                 items: [{ type: "string" }],
@@ -75,7 +77,7 @@ describe("targets without tuples", () => {
             },
             justTypes,
         );
-        expect(output).toContain("Integer *int64");
-        expect(output).toContain("String  *string");
+        expect(output).toContain("IntegerValue(val value: Long)");
+        expect(output).toContain("StringValue(val value: String)");
     });
 });
