@@ -37,7 +37,6 @@ import {
     isValueType,
     namingFunction,
     namingFunctionKeep,
-    noFollow,
 } from "./utils.js";
 
 const objectMemberNames = [
@@ -187,7 +186,7 @@ export class CSharpRenderer extends ConvenienceRenderer {
             (unionType) => {
                 const nullable = nullableFromUnion(unionType);
                 if (nullable !== null)
-                    return this.nullableCSType(nullable, noFollow);
+                    return this.nullableCSType(nullable, follow);
                 return this.nameForNamedType(unionType);
             },
             (transformedStringType) =>

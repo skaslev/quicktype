@@ -32,10 +32,6 @@ export enum AccessModifier {
     Internal = "Internal",
 }
 
-export function noFollow(t: Type): Type {
-    return t;
-}
-
 export function needTransformerForType(
     t: Type,
 ): "automatic" | "manual" | "nullable" | "none" {
