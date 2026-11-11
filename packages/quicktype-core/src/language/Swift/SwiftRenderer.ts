@@ -759,6 +759,13 @@ export class SwiftRenderer extends ConvenienceRenderer {
                         );
                     }
                 }
+
+                if (isClass) {
+                    this.emitClassEquatableAndHashable(
+                        className,
+                        this.initializableProperties(c).map((p) => p.name),
+                    );
+                }
             },
         );
 
@@ -775,6 +782,57 @@ export class SwiftRenderer extends ConvenienceRenderer {
         }
 
         this.endFile();
+    }
+
+    /// Swift synthesizes `==` and `hash(into:)` for structs and enums, but
+    /// not for classes, so a class that is `Equatable` or `Hashable` compares
+    /// and hashes its properties itself.
+    private emitClassEquatableAndHashable(
+        className: Name,
+        propertyNames: readonly Sourcelike[],
+    ): void {
+        const { equatable, hashable } = this._options.protocol;
+        // NSObject subclasses inherit `==` and `hashValue`, which call
+        // `isEqual` and `hash`.
+        if ((!equatable && !hashable) || this._options.objcSupport) return;
+
+        this.ensureBlankLine();
+        this.emitBlockWithAccess(
+            [
+                "static func == (lhs: ",
+                className,
+                ", rhs: ",
+                className,
+                ") -> Bool",
+            ],
+            () => {
+                const [first, ...rest] = propertyNames.map((name, i) => [
+                    "lhs.",
+                    name,
+                    " == rhs.",
+                    name,
+                    i < propertyNames.length - 1 ? " &&" : "",
+                ]);
+                if (first === undefined) {
+                    this.emitLine("return true");
+                    return;
+                }
+
+                this.emitLine("return ", first);
+                this.indent(() => {
+                    for (const comparison of rest) this.emitLine(comparison);
+                });
+            },
+        );
+
+        if (!hashable) return;
+
+        this.ensureBlankLine();
+        this.emitBlockWithAccess("func hash(into hasher: inout Hasher)", () => {
+            for (const name of propertyNames) {
+                this.emitLine("hasher.combine(self.", name, ")");
+            }
+        });
     }
 
     protected initializableProperties(c: ClassType): SwiftProperty[] {
