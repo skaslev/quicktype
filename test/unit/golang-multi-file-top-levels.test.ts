@@ -1,6 +1,7 @@
 // In Go's multi-file output, a top-level that is a class, enum or union is
 // in its type's file, which is written once: the top-level's comments, the
-// package and all imports, the top-level's functions, then the type.
+// package and all imports, the top-level's functions, then the type.  The
+// just-types modes finish the files of top-level aliases and unions, too.
 
 import { InputData, JSONSchemaInput, quicktypeMultiFile } from "quicktype-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -92,6 +93,46 @@ describe("Go multi-file top-levels", () => {
                 "func (r *TopLevel) Marshal() ([]byte, error) {",
             );
             expect(source.indexOf(declaration)).toBeGreaterThan(unmarshal);
+        });
+    }
+
+    for (const option of ["just-types", "just-types-and-package"]) {
+        test(`${option} writes the files of aliases and unions`, async () => {
+            const files = await renderFiles(
+                {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            a: {
+                                oneOf: [
+                                    { type: "string" },
+                                    { type: "integer" },
+                                ],
+                            },
+                            b: {
+                                oneOf: [
+                                    { type: "boolean" },
+                                    { type: "number" },
+                                ],
+                            },
+                        },
+                        required: ["a", "b"],
+                    },
+                },
+                { [option]: true },
+            );
+            expect(Array.from(files.keys()).sort()).toEqual([
+                "A.go",
+                "B.go",
+                "TopLevel.go",
+                "TopLevelElement.go",
+            ]);
+            expect(files.get("TopLevel.go")).toContain(
+                "type TopLevel []TopLevelElement",
+            );
+            expect(files.get("A.go")).toContain("type A struct {");
+            expect(files.get("B.go")).toContain("type B struct {");
         });
     }
 });

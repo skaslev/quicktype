@@ -289,8 +289,10 @@ export class GoRenderer extends ConvenienceRenderer {
             this.emitLine("type ", name, " ", this.goType(t));
         }
 
-        if (this._options.justTypes || this._options.justTypesAndPackage)
+        if (this._options.justTypes || this._options.justTypesAndPackage) {
+            this.endFile();
             return;
+        }
 
         this.emitTopLevelFunctions(name);
         this.endFile();
@@ -482,8 +484,10 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         this.emitDescription(this.descriptionForType(u));
         this.emitStruct(unionName, columns);
 
-        if (this._options.justTypes || this._options.justTypesAndPackage)
+        if (this._options.justTypes || this._options.justTypesAndPackage) {
+            this.endFile();
             return;
+        }
 
         this.ensureBlankLine();
         this.emitFunc(
