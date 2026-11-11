@@ -196,6 +196,12 @@ export class Java8DateTimeProvider extends JavaDateTimeProvider {
         ];
     }
 }
+// How the legacy provider writes dates and times, in UTC: Jackson with
+// these patterns for properties, `Converter.serialize...` for union members.
+const dateTimePattern = "yyyy-MM-dd'T'HH:mm:ss.SSSX";
+const datePattern = "yyyy-MM-dd";
+const timePattern = "HH:mm:ss.SSSX";
+
 export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
     public keywords = ["SimpleDateFormat", "Date"];
 
@@ -217,15 +223,15 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
     public timeType = "Date";
 
     public dateTimeJacksonAnnotations: string[] = [
-        '@JsonFormat(pattern = "yyyy-MM-dd\'T\'HH:mm:ss.SSSX", timezone = "UTC")',
+        `@JsonFormat(pattern = "${dateTimePattern}", timezone = "UTC")`,
     ];
 
     public dateJacksonAnnotations: string[] = [
-        '@JsonFormat(pattern = "yyyy-MM-dd")',
+        `@JsonFormat(pattern = "${datePattern}")`,
     ];
 
     public timeJacksonAnnotations: string[] = [
-        '@JsonFormat(pattern = "HH:mm:ssX", timezone = "UTC")',
+        `@JsonFormat(pattern = "${timePattern}", timezone = "UTC")`,
     ];
 
     public shouldEmitTimeConverter = false;
@@ -259,15 +265,26 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
         this._renderer.emitBlock(
             "public static Date parseAllDateTimeString(String str)",
             () => {
+                // SimpleDateFormat reads the fraction of a second as a
+                // number of milliseconds, so it must have three digits:
+                // ".5" would be 5 ms.
                 this._renderer.emitLine(
-                    'str = str.replaceFirst("(\\\\.\\\\d{3})\\\\d+", "$1");',
+                    'java.util.regex.Matcher fraction = java.util.regex.Pattern.compile("\\\\.(\\\\d+)").matcher(str);',
                 );
+                this._renderer.emitBlock("if (fraction.find())", () => {
+                    this._renderer.emitLine(
+                        'String millis = (fraction.group(1) + "00").substring(0, 3);',
+                    );
+                    this._renderer.emitLine(
+                        "str = str.substring(0, fraction.start(1)) + millis + str.substring(fraction.end(1));",
+                    );
+                });
                 this._renderer.emitBlock(
                     "for (String format : DATE_TIME_FORMATS)",
                     () => {
                         this._renderer.emitIgnoredTryCatchBlock(() => {
                             this._renderer.emitLine(
-                                "return new SimpleDateFormat(format).parse(str);",
+                                "return utcDateFormat(format).parse(str);",
                             );
                         });
                     },
@@ -276,12 +293,29 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
             },
         );
 
+        // Jackson writes the properties in UTC (see the annotations), so
+        // the union members are written, and values without a time zone
+        // read, in UTC too, whatever the JVM's default time zone.
+        this._renderer.ensureBlankLine();
+        this._renderer.emitBlock(
+            "private static SimpleDateFormat utcDateFormat(String format)",
+            () => {
+                this._renderer.emitLine(
+                    "SimpleDateFormat dateFormat = new SimpleDateFormat(format);",
+                );
+                this._renderer.emitLine(
+                    'dateFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));',
+                );
+                this._renderer.emitLine("return dateFormat;");
+            },
+        );
+
         this._renderer.ensureBlankLine();
         this._renderer.emitBlock(
             "public static String serializeDateTime(Date datetime)",
             () => {
                 this._renderer.emitLine(
-                    "return new SimpleDateFormat(\"yyyy-MM-dd'T'hh:mm:ssZ\").format(datetime);",
+                    `return utcDateFormat("${dateTimePattern}").format(datetime);`,
                 );
             },
         );
@@ -291,7 +325,7 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
             "public static String serializeDate(Date datetime)",
             () => {
                 this._renderer.emitLine(
-                    'return new SimpleDateFormat("yyyy-MM-dd").format(datetime);',
+                    `return utcDateFormat("${datePattern}").format(datetime);`,
                 );
             },
         );
@@ -301,7 +335,7 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
             "public static String serializeTime(Date datetime)",
             () => {
                 this._renderer.emitLine(
-                    'return new SimpleDateFormat("hh:mm:ssZ").format(datetime);',
+                    `return utcDateFormat("${timePattern}").format(datetime);`,
                 );
             },
         );
