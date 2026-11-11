@@ -46,13 +46,22 @@ export function isValueType(t: Type): boolean {
     );
 }
 
+// Go has a single nil for an optional property that is absent and one that
+// is null, so nullable properties get no `omitempty`, which would drop their
+// nulls; an absent one is written as null instead.  A union without null is
+// a pointer to its struct (see `propertyGoType`), which is only nil if the
+// property is absent.
+function isNullableProperty(t: Type): boolean {
+    if (t.kind === "union") return t.isNullable;
+    return ["null", "any"].includes(t.kind);
+}
+
 export function canOmitEmpty(
     cp: ClassProperty,
     omitEmptyOption: boolean,
 ): boolean {
     if (!cp.isOptional) return false;
-    if (omitEmptyOption)
-        return !["union", "null", "any"].includes(cp.type.kind);
+    if (omitEmptyOption) return !isNullableProperty(cp.type);
     const t = cp.type;
-    return !["union", "null", "any"].includes(t.kind);
+    return !isNullableProperty(t);
 }
