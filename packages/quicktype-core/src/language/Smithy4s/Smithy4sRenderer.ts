@@ -12,7 +12,6 @@ import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
-    matchCompoundType,
     matchType,
     nullableFromUnion,
     removeNullFromUnion,
@@ -127,8 +126,33 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
     // (asarazan): I've broken out the following two functions
     // because some renderers, such as kotlinx, can cope with `any`, while some get mad.
     protected arrayType(arrayType: ArrayType, _ = false): Sourcelike {
-        // this.emitTopLevelArray(arrayType, new Name(arrayType.getCombinedName().toString() + "List"))
-        return `${arrayType.getCombinedName().toString()}List`;
+        return this.collectionShapeName(arrayType, "List");
+    }
+
+    private readonly _collectionShapeNames = new Map<Type, string>();
+
+    private readonly _usedCollectionShapeNames = new Set<string>();
+
+    // Lists and maps are separate shapes named after the property they come
+    // from, so nested ones share their parent's combined name (`string[][]`
+    // is a list of lists), as do different types from properties of the same
+    // name; give each distinct type its own shape name.
+    private collectionShapeName(
+        t: ArrayType | MapType,
+        suffix: string,
+    ): string {
+        const existing = this._collectionShapeNames.get(t);
+        if (existing !== undefined) return existing;
+
+        const base = `${t.getCombinedName().toString()}${suffix}`;
+        let name = base;
+        for (let i = 2; this._usedCollectionShapeNames.has(name); i++) {
+            name = `${base}${i}`;
+        }
+
+        this._collectionShapeNames.set(t, name);
+        this._usedCollectionShapeNames.add(name);
+        return name;
     }
 
     protected emitArrayType(_: ArrayType, smithyType: Sourcelike): void {
@@ -136,8 +160,7 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
     }
 
     protected mapType(mapType: MapType, _ = false): Sourcelike {
-        return `${mapType.getCombinedName().toString()}Map`;
-        // return [this.scalaType(mapType.values, withIssues), "Map"];
+        return this.collectionShapeName(mapType, "Map");
     }
 
     protected scalaType(
@@ -299,36 +322,10 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
         this.emitClassDefinitionMethods(emitLater);
     }
 
-    protected emitClassDefinitionMethods(arrayTypes: ClassProperty[]): void {
+    protected emitClassDefinitionMethods(_arrayTypes: ClassProperty[]): void {
+        // The list and map shapes of the properties are emitted by
+        // emitCollectionShapes, after all other shapes.
         this.emitLine("}");
-        arrayTypes.forEach((p) => {
-            function ignore<T extends Type>(_: T): void {}
-
-            matchCompoundType(
-                p.type,
-                (at) => {
-                    this.emitLine([
-                        "list ",
-                        this.scalaType(at, true),
-                        "{ member: ",
-                        this.scalaType(at.items, true),
-                        "}",
-                    ]);
-                },
-                ignore,
-                (mt) => {
-                    this.emitLine([
-                        "map ",
-                        this.scalaType(mt, true),
-                        "{ key: String , value: ",
-                        this.scalaType(mt.values, true),
-                        "}",
-                    ]);
-                },
-                ignore,
-                ignore,
-            );
-        });
     }
 
     protected emitEnumDefinition(e: EnumType, enumName: Name): void {
@@ -367,18 +364,11 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
             return `_${kind}`;
         }
 
-        const emitLater: Type[] = [];
-
         this.emitDescription(this.descriptionForType(u));
 
         const [maybeNull, nonNulls] = removeNullFromUnion(u, sortBy);
         const theTypes: Sourcelike[] = [];
         this.forEachUnionMember(u, nonNulls, "none", null, (_, t) => {
-            const laterType = t.kind === "array" || t.kind === "map";
-            if (laterType) {
-                emitLater.push(t);
-            }
-
             theTypes.push(this.scalaType(t));
         });
         if (maybeNull !== null) {
@@ -393,35 +383,40 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
         });
         this.emitLine("}");
         this.ensureBlankLine();
+    }
 
-        emitLater.forEach((p) => {
-            function ignore<T extends Type>(_: T): void {}
+    // Every list and map that is referenced gets its own shape (see
+    // collectionShapeName).  Emitting one can reference further, nested
+    // collections, so repeat until all are emitted.
+    protected emitCollectionShapes(): void {
+        const emitted = new Set<Type>();
+        for (;;) {
+            const pending = Array.from(this._collectionShapeNames).filter(
+                ([t]) => !emitted.has(t),
+            );
+            if (pending.length === 0) break;
 
-            matchCompoundType(
-                p,
-                (at) => {
+            for (const [t, name] of pending) {
+                emitted.add(t);
+                if (t instanceof ArrayType) {
                     this.emitLine([
                         "list ",
-                        this.scalaType(at, true),
-                        "{ member: ",
-                        this.scalaType(at.items, true),
-                        "}",
+                        name,
+                        " { member: ",
+                        this.scalaType(t.items, true),
+                        " }",
                     ]);
-                },
-                ignore,
-                (mt) => {
+                } else if (t instanceof MapType) {
                     this.emitLine([
                         "map ",
-                        this.scalaType(mt, true),
-                        "{ key: String , value: ",
-                        this.scalaType(mt.values, true),
-                        "}",
+                        name,
+                        " { key: String, value: ",
+                        this.scalaType(t.values, true),
+                        " }",
                     ]);
-                },
-                ignore,
-                ignore,
-            );
-        });
+                }
+            }
+        }
     }
 
     protected emitSourceStructure(): void {
@@ -442,5 +437,8 @@ export class Smithy4sRenderer extends ConvenienceRenderer {
             (e, n) => this.emitEnumDefinition(e, n),
             (u, n) => this.emitUnionDefinition(u, n),
         );
+
+        this.ensureBlankLine();
+        this.emitCollectionShapes();
     }
 }
