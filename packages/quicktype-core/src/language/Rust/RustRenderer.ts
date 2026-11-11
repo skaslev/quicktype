@@ -6,6 +6,7 @@ import {
     nullTypeIssueAnnotation,
 } from "../../Annotation.js";
 import { minMaxValueForType } from "../../attributes/Constraints.js";
+import { isDistinctObject } from "../../attributes/DistinctObjects.js";
 import {
     ConvenienceRenderer,
     type ForbiddenWordsInfo,
@@ -45,7 +46,7 @@ import {
 } from "./utils.js";
 
 export class RustRenderer extends ConvenienceRenderer {
-    private _unionClasses: ReadonlySet<Type> | undefined;
+    private _strictClasses: ReadonlySet<Type> | undefined;
 
     public constructor(
         targetLanguage: TargetLanguage,
@@ -286,29 +287,49 @@ export class RustRenderer extends ConvenienceRenderer {
         return "";
     }
 
-    // Whether `c` is one of several classes of a union.  serde tries the
-    // variants of an untagged enum in turn, and a struct ignores unknown
-    // fields by default, so it would take the values of the other structs,
-    // too, if it doesn't require any of their fields.  A union only has
+    // Whether the struct of `c` rejects unknown fields: if `c` is one of
+    // several classes of a union, or a class that one of them contains
+    // whose schema doesn't allow additional properties either.  serde
+    // tries the variants of an untagged enum in turn, and a struct ignores
+    // unknown fields by default, so it would take the values of the other
+    // structs, too, if it doesn't require any of their fields, or if the
+    // structs it contains take the values of theirs.  A union only has
     // several classes if they don't allow additional properties, so their
-    // structs reject unknown fields, and every variant only takes values of
-    // its own.
-    private isUnionClass(c: ClassType): boolean {
-        if (this._unionClasses === undefined) {
-            const unionClasses = new Set<Type>();
+    // structs reject unknown fields, and so do the structs they contain
+    // that don't allow them, at any depth: every variant only takes values
+    // of its own.  The classes they contain that allow additional
+    // properties take any of them, as their schemas say.
+    private rejectsUnknownFields(c: ClassType): boolean {
+        if (this._strictClasses === undefined) {
+            const strictClasses = new Set<Type>();
             for (const t of this.typeGraph.allTypesUnordered()) {
                 if (!(t instanceof UnionType)) continue;
                 const classes = Array.from(t.members).filter(
                     (m) => m instanceof ClassType,
                 );
                 if (classes.length < 2) continue;
-                for (const m of classes) unionClasses.add(m);
+                for (const m of classes) strictClasses.add(m);
             }
 
-            this._unionClasses = unionClasses;
+            const seen = new Set<Type>();
+            const work = Array.from(strictClasses);
+            for (let t = work.pop(); t !== undefined; t = work.pop()) {
+                if (seen.has(t)) continue;
+                seen.add(t);
+                if (
+                    t instanceof ClassType &&
+                    isDistinctObject(t.getAttributes())
+                ) {
+                    strictClasses.add(t);
+                }
+
+                work.push(...t.getNonAttributeChildren());
+            }
+
+            this._strictClasses = strictClasses;
         }
 
-        return this._unionClasses.has(c);
+        return this._strictClasses.has(c);
     }
 
     protected emitStructDefinition(c: ClassType, className: Name): void {
@@ -338,7 +359,7 @@ export class RustRenderer extends ConvenienceRenderer {
             this.emitLine(`#[serde(rename_all = "${preferedNamingStyle}")]`);
         }
 
-        if (this.isUnionClass(c)) {
+        if (this.rejectsUnknownFields(c)) {
             this.emitLine("#[serde(deny_unknown_fields)]");
         }
 

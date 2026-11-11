@@ -142,3 +142,122 @@ test("classes that allow additional properties are unified", async () => {
     );
     expect(output).not.toContain("deny_unknown_fields");
 });
+
+describe("the classes that the classes of a union contain", () => {
+    // Whether the struct `name` in `output` rejects unknown fields.
+    function rejectsUnknownFields(output: string, name: string): boolean {
+        const declaration = output.slice(
+            0,
+            output.indexOf(`pub struct ${name} {`),
+        );
+        return declaration
+            .slice(declaration.lastIndexOf(derive))
+            .includes("#[serde(deny_unknown_fields)]");
+    }
+
+    function titled(title: string, schema: object): object {
+        return { title, ...schema };
+    }
+
+    test("reject unknown fields if their schemas don't allow them", async () => {
+        // `{"x": {"a": 1}}` is a `P`, but `F` would take it if `B` took
+        // unknown fields.
+        const output = await renderSchema({
+            oneOf: [
+                titled("P", closedObject({ x: { $ref: "#/$defs/A" } }, ["x"])),
+                titled("F", closedObject({ x: { $ref: "#/$defs/B" } }, ["x"])),
+            ],
+            $defs: {
+                A: closedObject({ a: { type: "integer" } }, ["a"]),
+                B: closedObject({ b: { type: "string" } }, []),
+            },
+        });
+        for (const name of ["P", "F", "A", "B"]) {
+            expect(rejectsUnknownFields(output, name)).toBe(true);
+        }
+    });
+
+    test("reject unknown fields at any depth, through other types", async () => {
+        const output = await renderSchema({
+            oneOf: [
+                titled(
+                    "P",
+                    closedObject(
+                        {
+                            items: {
+                                type: "array",
+                                items: { $ref: "#/$defs/A" },
+                            },
+                            values: {
+                                type: "object",
+                                additionalProperties: { $ref: "#/$defs/B" },
+                            },
+                            maybe: {
+                                oneOf: [
+                                    { $ref: "#/$defs/C" },
+                                    { type: "null" },
+                                ],
+                            },
+                        },
+                        [],
+                    ),
+                ),
+                titled("F", closedObject({ f: { type: "string" } }, ["f"])),
+            ],
+            $defs: {
+                A: closedObject({ a: { type: "integer" } }, ["a"]),
+                B: closedObject({ b: { type: "string" } }, []),
+                C: closedObject({ d: { $ref: "#/$defs/D" } }, ["d"]),
+                D: closedObject({ e: { type: "boolean" } }, []),
+            },
+        });
+        for (const name of ["P", "F", "A", "B", "C", "D"]) {
+            expect(rejectsUnknownFields(output, name)).toBe(true);
+        }
+    });
+
+    test("take unknown fields if their schemas allow them", async () => {
+        const output = await renderSchema({
+            oneOf: [
+                titled(
+                    "P",
+                    closedObject({ x: { $ref: "#/$defs/Open" } }, ["x"]),
+                ),
+                titled("F", closedObject({ f: { type: "string" } }, ["f"])),
+            ],
+            $defs: {
+                Open: {
+                    type: "object",
+                    properties: { a: { type: "integer" } },
+                },
+            },
+        });
+        expect(rejectsUnknownFields(output, "P")).toBe(true);
+        expect(rejectsUnknownFields(output, "Open")).toBe(false);
+    });
+
+    test("other classes take unknown fields", async () => {
+        const output = await renderSchema({
+            type: "object",
+            properties: {
+                reply: {
+                    oneOf: [
+                        { $ref: "#/$defs/Short" },
+                        { $ref: "#/$defs/Long" },
+                    ],
+                },
+                other: { $ref: "#/$defs/Other" },
+            },
+            required: ["reply", "other"],
+            additionalProperties: false,
+            $defs: {
+                ...defs,
+                Other: closedObject({ o: { type: "string" } }, ["o"]),
+            },
+        });
+        expect(rejectsUnknownFields(output, "Short")).toBe(true);
+        expect(rejectsUnknownFields(output, "Long")).toBe(true);
+        expect(rejectsUnknownFields(output, "TopLevel")).toBe(false);
+        expect(rejectsUnknownFields(output, "Other")).toBe(false);
+    });
+});
