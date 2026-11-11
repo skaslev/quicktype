@@ -951,6 +951,9 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         theType: Type,
     ): TypeRecord[] {
         const result: TypeRecord[] = [];
+        // A recursive union contains itself, e.g. through an array: collect
+        // the subtypes of each union once.
+        const collectedUnions = new Set<UnionType>();
         const recur = (
             forceInclude: boolean,
             isVariant: boolean,
@@ -1003,6 +1006,9 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     });
                     /** intentional "fall-through", add all subtypes as well - but forced include */
                 }
+
+                if (collectedUnions.has(t)) return;
+                collectedUnions.add(t);
 
                 const [hasNull, nonNulls] = removeNullFromUnion(t);
                 isVariant = hasNull !== null;
@@ -3472,6 +3478,19 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
         if (c instanceof UnionType) {
             this.updateIncludes(false, includes, c, defName);
+            if (this.isRecursiveUnion(c)) {
+                // A recursive union is a struct deriving from the variant,
+                // which needs the classes it holds by value to be complete:
+                // those not forward declared, see `cppTypeInOptional`.
+                for (const t of removeNullFromUnion(c)[1]) {
+                    if (!(t instanceof ClassType)) continue;
+                    if (this.isForwardDeclaredType(t)) continue;
+                    includes.set(
+                        this.sourcelikeToString(this.nameForNamedType(t)),
+                        { kind: IncludeKind.Include, typeKind: "class" },
+                    );
+                }
+            }
         } else if (c instanceof ClassType) {
             this.forEachClassProperty(
                 c,

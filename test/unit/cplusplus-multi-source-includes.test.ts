@@ -1,0 +1,120 @@
+// In C++ multi-source output every named type has its own header, which
+// includes the headers of the types it needs complete and forward declares
+// the others.
+
+import { InputData, JSONSchemaInput, quicktypeMultiFile } from "quicktype-core";
+import { describe, expect, test } from "vitest";
+
+async function multiSourceFiles(schema: object): Promise<Map<string, string>> {
+    const schemaInput = new JSONSchemaInput(undefined);
+    await schemaInput.addSource({
+        name: "TopLevel",
+        schema: JSON.stringify(schema),
+    });
+    const inputData = new InputData();
+    inputData.addInput(schemaInput);
+
+    const result = await quicktypeMultiFile({
+        inputData,
+        lang: "cplusplus",
+        outputFilename: "quicktype.hpp",
+        rendererOptions: { "source-style": "multi-source" },
+    });
+    return new Map(
+        Array.from(result, ([filename, serialized]) => [
+            filename,
+            serialized.lines.join("\n"),
+        ]),
+    );
+}
+
+async function header(schema: object, filename: string): Promise<string> {
+    const source = (await multiSourceFiles(schema)).get(filename);
+    if (source === undefined) throw new Error(`No ${filename}`);
+    return source;
+}
+
+// The headers a header includes, and the types it forward declares.
+function includedHeaders(source: string): string[] {
+    return Array.from(
+        source.matchAll(/^#include "(\w+)\.hpp"$/gm),
+        (m) => m[1],
+    );
+}
+
+function forwardDeclarations(source: string): string[] {
+    return Array.from(
+        source.matchAll(/^ *(?:class|struct) (\w+);$/gm),
+        (m) => m[1],
+    );
+}
+
+const leaf = {
+    type: "object",
+    properties: { value: { type: "integer" } },
+    required: ["value"],
+    additionalProperties: false,
+};
+
+describe("C++ multi-source recursive unions", () => {
+    const node = {
+        $ref: "#/definitions/Node",
+        definitions: {
+            Node: {
+                anyOf: [
+                    { $ref: "#/definitions/Leaf" },
+                    { type: "array", items: { $ref: "#/definitions/Node" } },
+                ],
+            },
+            Leaf: leaf,
+        },
+    };
+
+    test("a union of a class and an array of itself includes the class", async () => {
+        const source = await header(node, "TopLevel.hpp");
+        expect(source).toContain(
+            "struct TopLevel : std::variant<std::vector<TopLevel>, Leaf> {",
+        );
+        expect(includedHeaders(source)).toContain("Leaf");
+    });
+
+    test("a union of a string and an array of itself", async () => {
+        const source = await header(
+            {
+                $ref: "#/definitions/R",
+                definitions: {
+                    R: {
+                        anyOf: [
+                            {
+                                type: "array",
+                                items: { $ref: "#/definitions/R" },
+                            },
+                            { type: "string" },
+                        ],
+                    },
+                },
+            },
+            "TopLevel.hpp",
+        );
+        expect(source).toContain(
+            "struct TopLevel : std::variant<std::vector<TopLevel>, std::string> {",
+        );
+    });
+
+    test("a class with a recursive union member includes the union's class", async () => {
+        const source = await header(
+            {
+                type: "object",
+                properties: { node: { $ref: "#/definitions/Node" } },
+                required: ["node"],
+                additionalProperties: false,
+                definitions: node.definitions,
+            },
+            "TopLevel.hpp",
+        );
+        expect(includedHeaders(source)).toEqual(
+            expect.arrayContaining(["Node", "Leaf"]),
+        );
+        expect(forwardDeclarations(source)).toEqual([]);
+    });
+});
