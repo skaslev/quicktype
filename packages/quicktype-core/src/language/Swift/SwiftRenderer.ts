@@ -24,7 +24,7 @@ import {
     MapType,
     type Type,
     type TypeKind,
-    type UnionType,
+    UnionType,
 } from "../../Type/index.js";
 import {
     matchType,
@@ -118,6 +118,14 @@ export class SwiftRenderer extends ConvenienceRenderer {
     protected isImplicitCycleBreaker(t: Type): boolean {
         const kind = t.kind;
         return kind === "array" || kind === "map";
+    }
+
+    // A nullable union is an optional, not an enum that could be `indirect`,
+    // so it can't break a cycle.  Its non-null member can: that member is
+    // on the same cycle, and it's a class, because unions are flattened and
+    // arrays and maps break cycles implicitly.
+    protected canBreakCycles(t: Type): boolean {
+        return !(t instanceof UnionType && nullableFromUnion(t) !== null);
     }
 
     protected emitDescriptionBlock(lines: Sourcelike[]): void {
