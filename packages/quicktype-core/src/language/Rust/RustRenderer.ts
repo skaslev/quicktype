@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import { mapFirst } from "collection-utils";
+import { iterableSome, mapFirst } from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -14,6 +14,7 @@ import type { Name, Namer } from "../../Naming.js";
 import type { RenderContext } from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
+import { defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
     type ClassType,
@@ -312,6 +313,16 @@ export class RustRenderer extends ConvenienceRenderer {
 
         const [, nonNulls] = removeNullFromUnion(u);
 
+        // serde takes the first variant of an untagged enum that
+        // deserializes, and a struct also deserializes from an array of its
+        // fields' values, so the array variant goes before a struct variant,
+        // which would take the arrays of as many elements of its fields'
+        // types.
+        const sortOrder = iterableSome(nonNulls, (t) => t.kind === "class")
+            ? (n: Name, t: Type): string =>
+                  `${t.kind === "array" ? 0 : 1}${defined(this.names.get(n))}`
+            : null;
+
         const blankLines =
             this._options.density === Density.Dense ? "none" : "interposing";
         this.emitBlock(["pub enum ", unionName], () =>
@@ -319,7 +330,7 @@ export class RustRenderer extends ConvenienceRenderer {
                 u,
                 nonNulls,
                 blankLines,
-                null,
+                sortOrder,
                 (fieldName, t) => {
                     const rustType = this.breakCycle(t, true);
                     this.emitLine([fieldName, "(", rustType, "),"]);
