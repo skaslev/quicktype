@@ -469,6 +469,8 @@ function prettyTypeName(typ${anyAnnotation})${stringAnnotation} {
         } else {
             return \`one of [\${typ.map(a => { return prettyTypeName(a); }).join(", ")}]\`;
         }
+    } else if (typ === null) {
+        return "null";
     } else if (typeof typ === "object" && typ.literal !== undefined) {
         return typ.literal;
     } else {
