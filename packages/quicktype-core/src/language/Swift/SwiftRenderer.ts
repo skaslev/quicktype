@@ -1351,8 +1351,20 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
         }
 
         if (this._needAny) {
+            // A Sendable class must be final.  JSONCodingKey is Sendable
+            // because CodingKey is.  The compiler can't check JSONAny, whose
+            // value is `Any`, but the value is an immutable tree of Bools,
+            // Int64s, Doubles, Strings and JSONNulls, and arrays and
+            // dictionaries of them, so JSONAny is Sendable, too.
+            const final =
+                this._options.finalClasses || this._options.sendable
+                    ? "final "
+                    : "";
+            const sendable = this._options.sendable
+                ? ", @unchecked Sendable"
+                : "";
             this.ensureBlankLine();
-            this.emitMultiline(`${this._options.finalClasses ? "final " : ""}class JSONCodingKey: CodingKey {
+            this.emitMultiline(`${final}class JSONCodingKey: CodingKey {
 	let key: String
 	
 	required init?(intValue: Int) {
@@ -1377,14 +1389,18 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
                 this.emitLine(
                     this.objcMembersDeclaration,
                     this.accessLevel,
-                    this._options.finalClasses ? "final " : "",
-                    "class JSONAny: NSObject, Codable {",
+                    final,
+                    "class JSONAny: NSObject, Codable",
+                    sendable,
+                    " {",
                 );
             } else {
                 this.emitLine(
                     this.accessLevel,
-                    this._options.finalClasses ? "final " : "",
-                    "class JSONAny: Codable {",
+                    final,
+                    "class JSONAny: Codable",
+                    sendable,
+                    " {",
                 );
             }
 
