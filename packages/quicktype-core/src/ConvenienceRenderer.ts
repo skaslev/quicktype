@@ -818,9 +818,11 @@ export abstract class ConvenienceRenderer extends Renderer {
             return simpleName;
         }
 
+        // Array items and map values can be transformed types (C# unions,
+        // enums, ...), which the type graph holds as their source type.
         const typeNameForUnionMember = (t: Type): string =>
             matchTypeExhaustive(
-                t,
+                followTargetType(t),
                 (_noneType) => {
                     return panic("none type should have been replaced");
                 },
