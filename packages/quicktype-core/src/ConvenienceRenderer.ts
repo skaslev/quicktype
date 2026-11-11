@@ -110,6 +110,7 @@ function splitDescription(
 
 export interface ForbiddenWordsInfo {
     includeGlobalForbidden: boolean;
+    includeGlobalNames?: boolean;
     names: Array<Name | string>;
 }
 
@@ -198,7 +199,8 @@ export abstract class ConvenienceRenderer extends Renderer {
      * If `includeGlobalForbidden` is set, then all names that are forbidden
      * in the global namespace will also be forbidden for the properties.
      * Note: That doesn't mean that the names in the global namespace will be
-     * forbidden, too!
+     * forbidden, too!  If `includeGlobalNames` is set, they are: the names of
+     * the types, for languages where a member hides the type of the same name.
      */
     protected forbiddenForObjectProperties(
         _o: ObjectType,
@@ -513,6 +515,10 @@ export abstract class ConvenienceRenderer extends Renderer {
             forbiddenNamespaces = forbiddenNamespaces.add(
                 defined(this._globalForbiddenNamespace),
             );
+        }
+
+        if (info.includeGlobalNames === true) {
+            forbiddenNamespaces = forbiddenNamespaces.add(this.globalNamespace);
         }
 
         if (namespace !== undefined) {
