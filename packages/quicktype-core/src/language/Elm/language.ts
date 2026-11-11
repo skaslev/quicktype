@@ -59,6 +59,10 @@ export class ElmTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsRecursiveUnions(): boolean {
+        return true;
+    }
+
     // Elm compiles to JavaScript, where `Int` is an IEEE-754 double at
     // runtime, so integers are only exact within the JS safe range.
     public getSupportedIntegerRange(): IntegerRange | null {

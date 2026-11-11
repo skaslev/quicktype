@@ -62,3 +62,53 @@ describe("recursive unions", () => {
         expect(output).not.toContain("Jdec.lazy");
     });
 });
+
+// Like a Redis COMMAND INFO reply: a node is a name, its leaves and its
+// child nodes.  The tuple becomes an array of the union of its items, which
+// contains itself through arrays.
+const tree = {
+    type: "object",
+    properties: { root: { $ref: "#/$defs/node" } },
+    required: ["root"],
+    additionalProperties: false,
+    $defs: {
+        node: {
+            type: "array",
+            minItems: 1,
+            items: [
+                { type: "string" },
+                {
+                    type: "array",
+                    items: {
+                        title: "Leaf",
+                        type: "object",
+                        properties: { name: { type: "string" } },
+                        required: ["name"],
+                        additionalProperties: false,
+                    },
+                },
+                { type: "array", items: { $ref: "#/$defs/node" } },
+            ],
+        },
+    },
+};
+
+describe("recursive tuples", () => {
+    test("keep their reference to themselves", async () => {
+        const output = await renderSchema(tree, { "just-types": true });
+        expect(output).toContain("= LeafInPurpleNode Leaf");
+        expect(output).toContain(
+            "| UnionArrayInTopLevelNode (List PurpleNode)",
+        );
+        expect(output).toContain(
+            "| UnionArrayInPurpleNode (List TopLevelNode)",
+        );
+    });
+
+    test("are decoded lazily", async () => {
+        const output = await renderSchema(tree);
+        expect(output).toContain(
+            "Jdec.map UnionArrayInTopLevelNode (Jdec.lazy (\\_ -> Jdec.list purpleNode ))",
+        );
+    });
+});
