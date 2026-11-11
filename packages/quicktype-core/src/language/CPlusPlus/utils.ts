@@ -104,6 +104,8 @@ export interface IncludeRecord {
 
 export interface TypeRecord {
     forceInclude: boolean;
+    /** Held by value in a std::optional */
+    inOptional?: boolean;
     level: number;
     name: Name;
     type: Type;

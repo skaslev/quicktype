@@ -269,3 +269,39 @@ describe("C++ multi-source mutually recursive types", () => {
         ]);
     });
 });
+
+describe("C++ multi-source nullable classes", () => {
+    const nullable = (type: object) => ({ anyOf: [type, { type: "null" }] });
+
+    test("a std::optional of a class includes the class", async () => {
+        const schema = {
+            ...object({ root: nullable(ref("C")) }, ["root"]),
+            definitions: { C: leaf },
+        };
+        expect(await header(schema, "TopLevel.hpp")).toContain(
+            "std::optional<C> root;",
+        );
+        expect(await inclusion(schema, "TopLevel.hpp", "C")).toEqual([
+            "include",
+        ]);
+    });
+
+    test("a std::optional of a class in a cycle includes the class", async () => {
+        const schema = {
+            $ref: "#/definitions/A",
+            definitions: {
+                A: object({ b: nullable(ref("B")) }, ["b"]),
+                B: object({ as: arrayOf(ref("A")) }, ["as"]),
+            },
+        };
+        expect(await header(schema, "TopLevel.hpp")).toContain(
+            "std::optional<B> b;",
+        );
+        expect(await inclusion(schema, "TopLevel.hpp", "B")).toEqual([
+            "include",
+        ]);
+        expect(await inclusion(schema, "B.hpp", "TopLevel")).toEqual([
+            "forward",
+        ]);
+    });
+});

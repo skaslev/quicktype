@@ -959,6 +959,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             isVariant: boolean,
             l: number,
             t: Type,
+            inOptional = false,
         ): void => {
             if (t instanceof ArrayType) {
                 recur(true, isVariant, l + 1, t.items);
@@ -969,6 +970,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     level: l,
                     variant: isVariant,
                     forceInclude,
+                    inOptional,
                 });
             } else if (t instanceof MapType) {
                 recur(true, isVariant, l + 1, t.values);
@@ -1014,9 +1016,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
                 const [hasNull, nonNulls] = removeNullFromUnion(t);
                 isVariant = hasNull !== null;
+                // `T | null` is a std::optional<T> where it can be, see
+                // `optionalType`, which holds T by value.
+                const optionalByValue =
+                    !this.unionNeedsName(t) &&
+                    this.isOptionalAsValuePossible(t);
                 /** we need to collect all the subtypes of the union */
                 for (const tt of nonNulls) {
-                    recur(forceInclude, isVariant, l + 1, tt);
+                    recur(forceInclude, isVariant, l + 1, tt, optionalByValue);
                 }
             }
         };
@@ -3437,8 +3444,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                  * A class that contains the type being defined is in a cycle with
                  * it, so it's held through a std::shared_ptr or in a container,
                  * where a declaration is enough.  Its header includes this one.
+                 * But a std::optional holds its class by value.
                  */
-                if (this.typeReaches(t.type, definedType)) {
+                if (t.inOptional === true) {
+                    propRecord.kind = IncludeKind.Include;
+                } else if (this.typeReaches(t.type, definedType)) {
                     propRecord.kind = IncludeKind.ForwardDeclare;
                 }
             } else if (t.type instanceof EnumType) {
