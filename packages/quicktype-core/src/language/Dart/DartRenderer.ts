@@ -334,11 +334,14 @@ export class DartRenderer extends ConvenienceRenderer {
         constrained?: Type,
     ): Sourcelike {
         const [min, max] = constrained === undefined ? [undefined, undefined] : (minMaxItemsForType(constrained) ?? []);
+        // The list is the closure's argument, not a local of its body: the
+        // list expression can refer to an `x` of the enclosing scope, the
+        // item of an outer list (arrays of constrained arrays).
         const checked = (value: Sourcelike): Sourcelike =>
             min === undefined && max === undefined ? value : [
-                "(() { final x = ", value, "; if (",
+                "((List<", itemType, "> x) { if (",
                 [min !== undefined && `x.length < ${min}`, max !== undefined && `x.length > ${max}`].filter(Boolean).join(" || "),
-                ") throw FormatException('Invalid array length'); return x; })()",
+                ") throw FormatException('Invalid array length'); return x; })(", value, ")",
             ];
         if (isNullable && !this._options.requiredProperties) {
             return [
