@@ -10,6 +10,7 @@ import {
     JS_SAFE_INTEGER_RANGE,
 } from "../../support/IntegerRange.js";
 import { TargetLanguage } from "../../TargetLanguage.js";
+import type { TupleSupport } from "../../Type/index.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
 import { ElmRenderer } from "./ElmRenderer.js";
@@ -61,6 +62,12 @@ export class ElmTargetLanguage extends TargetLanguage<
 
     public get supportsRecursiveUnions(): boolean {
         return true;
+    }
+
+    // Tuples are Elm tuples, records or custom types, whose decoders and
+    // encoders read and write JSON arrays.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     // Elm compiles to JavaScript, where `Int` is an IEEE-754 double at

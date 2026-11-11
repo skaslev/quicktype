@@ -29,6 +29,7 @@ import {
     type ClassProperty,
     ClassType,
     EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -42,6 +43,14 @@ import {
     requiredOrOptional,
     upperNamingFunction,
 } from "./utils.js";
+
+// The helpers of tuples' decoders and encoders.
+const tupleHelperNames = [
+    "tupleOfLength",
+    "optionalTupleItem",
+    "tupleRestItems",
+    "presentTupleItems",
+];
 
 interface TopLevelDependent {
     decoder?: Name;
@@ -69,12 +78,20 @@ export class ElmRenderer extends ConvenienceRenderer {
     }
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
-        // The parameters of the custom type records' decoders, `x0`, `x1`,
-        // ...: Elm doesn't allow a parameter to shadow a top-level
-        // definition.
+        const types = Array.from(this.typeGraph.allTypesUnordered());
+        const tuples = types.filter(
+            (t): t is TupleType => t instanceof TupleType,
+        );
+
+        // The tuple helpers, and the variables of the custom types'
+        // decoders and encoders, `x0`, `x1`, ...: Elm doesn't allow a
+        // variable to shadow a top-level definition.
         const arity = Math.max(
             0,
-            ...Array.from(this.typeGraph.allTypesUnordered())
+            ...tuples
+                .filter((t) => this.tupleForm(t) === "custom")
+                .map((t) => this.tupleFieldCount(t)),
+            ...types
                 .filter(
                     (t): t is ClassType =>
                         t instanceof ClassType && this.classIsCustomType(t),
@@ -83,8 +100,50 @@ export class ElmRenderer extends ConvenienceRenderer {
         );
         return [
             ...forbiddenNames,
+            ...(tuples.length > 0 ? tupleHelperNames : []),
             ...Array.from({ length: arity }, (_, i) => `x${i}`),
         ];
+    }
+
+    // Every tuple gets a decoder and an encoder function.  Only those that
+    // the schema names, top-levels and tuples that aren't Elm tuples are
+    // declared as types, see `tupleIsDeclared`.
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return true;
+    }
+
+    /**
+     * How a tuple is declared: Elm's 2- and 3-tuples hold fixed-length
+     * tuples of 2 or 3 items; other tuples are records with a field per
+     * item, `item0`, `item1`, ..., and `rest`.  A type alias can't refer to
+     * itself, other than through a custom type, so a tuple that contains
+     * itself otherwise is a custom type whose constructor takes the items
+     * in order.
+     */
+    private tupleForm(t: TupleType): "tuple" | "record" | "custom" {
+        const isCustomType = (c: Type): boolean =>
+            c instanceof EnumType ||
+            (c instanceof UnionType && nullableFromUnion(c) === null);
+        if (this.isInCycleThrough(t, (c) => !isCustomType(c))) {
+            return "custom";
+        }
+
+        return t.isFixedLength && (t.items.length === 2 || t.items.length === 3)
+            ? "tuple"
+            : "record";
+    }
+
+    private tupleIsDeclared(t: TupleType): boolean {
+        return (
+            this.tupleForm(t) !== "tuple" ||
+            this.hasGivenName(t) ||
+            mapContains(this.topLevels, t)
+        );
+    }
+
+    /** The items, and the rest. */
+    private tupleFieldCount(t: TupleType): number {
+        return t.items.length + (t.rest === undefined ? 0 : 1);
     }
 
     /**
@@ -92,7 +151,8 @@ export class ElmRenderer extends ConvenienceRenderer {
      * `type A = A { ... }`, instead of a type alias for the record.  Elm
      * doesn't allow a type alias to refer to itself, other than through a
      * custom type, so a class that contains itself through records,
-     * lists, dicts and `Maybe`s only is a custom type.
+     * lists, dicts, `Maybe`s and tuples that aren't custom types only is a
+     * custom type.
      */
     private classIsCustomType(c: ClassType): boolean {
         let result = this._classIsCustomType.get(c);
@@ -100,37 +160,11 @@ export class ElmRenderer extends ConvenienceRenderer {
 
         const isCustomType = (t: Type): boolean =>
             t instanceof EnumType ||
-            (t instanceof UnionType && nullableFromUnion(t) === null);
-        const seen = new Set<Type>();
-        const work = Array.from(c.getNonAttributeChildren());
-        result = false;
-        for (let t = work.pop(); t !== undefined; t = work.pop()) {
-            if (t === c) {
-                result = true;
-                break;
-            }
-
-            if (seen.has(t) || isCustomType(t)) continue;
-            seen.add(t);
-            work.push(...t.getNonAttributeChildren());
-        }
-
+            (t instanceof UnionType && nullableFromUnion(t) === null) ||
+            (t instanceof TupleType && this.tupleForm(t) === "custom");
+        result = this.isInCycleThrough(c, (t) => !isCustomType(t));
         this._classIsCustomType.set(c, result);
         return result;
-    }
-
-    // Whether `t` is `target` or contains it.
-    private containsType(t: Type, target: Type): boolean {
-        const seen = new Set<Type>();
-        const work = [t];
-        for (let c = work.pop(); c !== undefined; c = work.pop()) {
-            if (c === target) return true;
-            if (seen.has(c)) continue;
-            seen.add(c);
-            work.push(...c.getNonAttributeChildren());
-        }
-
-        return false;
     }
 
     protected makeTopLevelDependencyNames(
@@ -279,7 +313,54 @@ export class ElmRenderer extends ConvenienceRenderer {
 
                 return singleWord(this.nameForNamedType(unionType));
             },
+            undefined,
+            (tupleType) =>
+                this.tupleIsDeclared(tupleType)
+                    ? singleWord(this.nameForNamedType(tupleType))
+                    : this.elmTupleType(tupleType),
         );
+    }
+
+    /** `( A, B )` */
+    private elmTupleType(t: TupleType): MultiWord {
+        return singleWord(
+            "( ",
+            arrayIntercalate(
+                ", ",
+                t.items.map((item) => this.elmType(item).source),
+            ),
+            " )",
+        );
+    }
+
+    /**
+     * The type of each item, `Maybe` for the optional ones, and of the
+     * rest.  An optional item that can be null is a `Maybe (Maybe a)`:
+     * `Nothing` if it's missing, `Just Nothing` if it's null.
+     */
+    private tupleFieldTypes(t: TupleType): MultiWord[] {
+        const types = t.items.map((item, i) =>
+            i < t.minItems
+                ? this.elmType(item)
+                : multiWord(" ", "Maybe", parenIfNeeded(this.elmType(item))),
+        );
+        if (t.rest !== undefined) {
+            types.push(
+                multiWord(
+                    " ",
+                    this.arrayType,
+                    parenIfNeeded(this.elmType(t.rest)),
+                ),
+            );
+        }
+
+        return types;
+    }
+
+    private tupleFieldNames(t: TupleType): string[] {
+        const names = t.items.map((_, i) => `item${i}`);
+        if (t.rest !== undefined) names.push("rest");
+        return names;
     }
 
     private elmProperty(p: ClassProperty): Sourcelike {
@@ -368,6 +449,8 @@ export class ElmRenderer extends ConvenienceRenderer {
 
                 return singleWord(this.decoderNameForNamedType(unionType));
             },
+            undefined,
+            (tupleType) => singleWord(this.decoderNameForNamedType(tupleType)),
         );
     }
 
@@ -426,6 +509,8 @@ export class ElmRenderer extends ConvenienceRenderer {
 
                 return singleWord(this.encoderNameForNamedType(unionType));
             },
+            undefined,
+            (tupleType) => singleWord(this.encoderNameForNamedType(tupleType)),
         );
     }
 
@@ -538,6 +623,49 @@ export class ElmRenderer extends ConvenienceRenderer {
 
                 onFirst = false;
             });
+        });
+    }
+
+    private emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        if (!this.tupleIsDeclared(t)) return;
+
+        this.emitDescription(this.descriptionForType(t));
+        const form = this.tupleForm(t);
+        if (form === "tuple") {
+            this.emitLine(
+                "type alias ",
+                tupleName,
+                " = ",
+                this.elmTupleType(t).source,
+            );
+            return;
+        }
+
+        const types = this.tupleFieldTypes(t);
+        if (form === "custom") {
+            this.emitLine("type ", tupleName);
+            this.indent(() =>
+                this.emitLine(
+                    "= ",
+                    tupleName,
+                    ...types.map((type) => [" ", parenIfNeeded(type)]),
+                ),
+            );
+            return;
+        }
+
+        this.emitLine("type alias ", tupleName, " =");
+        this.indent(() => {
+            this.tupleFieldNames(t).forEach((name, i) => {
+                this.emitLine(
+                    i === 0 ? "{" : ",",
+                    " ",
+                    name,
+                    " : ",
+                    types[i].source,
+                );
+            });
+            this.emitLine("}");
         });
     }
 
@@ -749,9 +877,212 @@ export class ElmRenderer extends ConvenienceRenderer {
         });
     }
 
+    // Whether `t` is `target` or contains it.
+    private containsType(t: Type, target: Type): boolean {
+        const seen = new Set<Type>();
+        const work = [t];
+        for (let c = work.pop(); c !== undefined; c = work.pop()) {
+            if (c === target) return true;
+            if (seen.has(c)) continue;
+            seen.add(c);
+            work.push(...c.getNonAttributeChildren());
+        }
+
+        return false;
+    }
+
+    /**
+     * Checks the length of the JSON array, then decodes the items with
+     * `Jdec.index`, the optional ones only if they're there, and the rest.
+     * The items' decoders are in a function, so the decoder can refer to
+     * itself.
+     */
+    private emitTupleFunctions(t: TupleType, tupleName: Name): void {
+        const form = this.tupleForm(t);
+        const type = this.elmType(t).source;
+        const [minConstraint, maxConstraint] = minMaxItemsForType(t) ?? [];
+        const min = Math.max(t.minItems, minConstraint ?? 0);
+        const max = t.rest === undefined ? t.items.length : maxConstraint;
+        // The decoders of optional items and the rest need the length.
+        const needsLength = t.minItems < t.items.length || t.rest !== undefined;
+
+        const decoderName = this.decoderNameForNamedType(t);
+        this.emitLine(decoderName, " : Jdec.Decoder ", type);
+        this.emitLine(decoderName, " =");
+        this.indent(() => {
+            this.emitLine(
+                "tupleOfLength ",
+                min.toString(),
+                max === undefined ? " Nothing" : ` (Just ${max})`,
+                needsLength ? " (\\m ->" : " (\\_ ->",
+            );
+            this.indent(() => {
+                const decoders: Sourcelike[] = t.items.map((item, i) => {
+                    const decoder = parenIfNeeded(
+                        this.decoderNameForType(item),
+                    );
+                    return i < t.minItems
+                        ? ["(Jdec.index ", i.toString(), " ", decoder, ")"]
+                        : [
+                              "(optionalTupleItem m ",
+                              i.toString(),
+                              " ",
+                              decoder,
+                              ")",
+                          ];
+                });
+                const rest = t.rest;
+                if (rest !== undefined) {
+                    const items: Sourcelike = [
+                        "tupleRestItems m ",
+                        t.items.length.toString(),
+                        " ",
+                        parenIfNeeded(this.decoderNameForType(rest)),
+                    ];
+                    decoders.push(
+                        this._options.useList
+                            ? ["(", items, ")"]
+                            : ["(Jdec.map Array.fromList (", items, "))"],
+                    );
+                }
+
+                if (form === "tuple") {
+                    this.emitLine(
+                        t.items.length === 2
+                            ? "Jdec.map2 Tuple.pair"
+                            : "Jdec.map3 (\\x y r -> ( x, y, r ))",
+                    );
+                    this.indent(() => {
+                        decoders.forEach((decoder, i) => {
+                            this.emitLine(
+                                decoder,
+                                i === decoders.length - 1 ? ")" : "",
+                            );
+                        });
+                    });
+                    return;
+                }
+
+                this.emitLine("Jdec.succeed ", tupleName);
+                this.indent(() => {
+                    decoders.forEach((decoder, i) => {
+                        this.emitLine(
+                            "|> Jpipe.custom ",
+                            decoder,
+                            i === decoders.length - 1 ? ")" : "",
+                        );
+                    });
+                });
+            });
+        });
+        this.ensureBlankLine();
+
+        // The items' values, in order.
+        const fields =
+            form === "tuple"
+                ? ["x", "y", "r"].slice(0, t.items.length)
+                : form === "custom"
+                  ? Array.from(
+                        { length: this.tupleFieldCount(t) },
+                        (_, i) => `x${i}`,
+                    )
+                  : this.tupleFieldNames(t).map((name) => `x.${name}`);
+        const hasOptionalItems = t.minItems < t.items.length;
+        const encoded: Sourcelike[] = t.items.map((item, i) => {
+            const encoder = this.encoderNameForType(item).source;
+            if (!hasOptionalItems) return [encoder, " ", fields[i]];
+            if (i < t.minItems) {
+                return ["Just (", encoder, " ", fields[i], ")"];
+            }
+
+            return [
+                "Maybe.map ",
+                parenIfNeeded(this.encoderNameForType(item)),
+                " ",
+                fields[i],
+            ];
+        });
+        const rest = t.rest;
+        let restValues: Sourcelike | undefined;
+        if (rest !== undefined) {
+            const values = this._options.useList
+                ? fields[t.items.length]
+                : ["(Array.toList ", fields[t.items.length], ")"];
+            const restEncoder = parenIfNeeded(this.encoderNameForType(rest));
+            restValues = [
+                " ++ List.map ",
+                hasOptionalItems
+                    ? ["(Just << ", restEncoder, ")"]
+                    : restEncoder,
+                " ",
+                values,
+            ];
+        }
+
+        const encoderName = this.encoderNameForNamedType(t);
+        this.emitLine(encoderName, " : ", type, " -> Jenc.Value");
+        if (form === "tuple") {
+            this.emitLine(encoderName, " ( ", fields.join(", "), " ) =");
+            this.indent(() =>
+                this.emitLine(
+                    "Jenc.list identity [ ",
+                    arrayIntercalate(", ", encoded),
+                    " ]",
+                ),
+            );
+            return;
+        }
+
+        if (form === "custom") {
+            this.emitLine(
+                encoderName,
+                " (",
+                tupleName,
+                " ",
+                fields.join(" "),
+                ") =",
+            );
+        } else {
+            this.emitLine(encoderName, " x =");
+        }
+
+        // An item after a missing optional item can't be written: the
+        // array ends at the first missing item.
+        this.indent(() => {
+            this.emitLine(
+                "Jenc.list identity",
+                hasOptionalItems ? " (presentTupleItems" : "",
+                restValues === undefined ? "" : " (",
+            );
+            this.indent(() => {
+                encoded.forEach((e, i) => {
+                    this.emitLine(i === 0 ? "[ " : ", ", e);
+                });
+                this.emitLine(
+                    "]",
+                    restValues === undefined ? "" : [restValues, ")"],
+                    hasOptionalItems ? ")" : "",
+                );
+            });
+        });
+    }
+
     private emitUnionFunctions(u: UnionType, unionName: Name): void {
         // We need arrays first, then strings, and integers before doubles.
+        // Tuples go before arrays, which would take them too: fixed-length
+        // ones first, then those with optional items, then those with a
+        // rest.
         function sortOrder(_: Name, t: Type): string {
+            if (t instanceof TupleType) {
+                const shape =
+                    t.rest !== undefined
+                        ? 2
+                        : t.minItems < t.items.length
+                          ? 1
+                          : 0;
+                return `  ${shape}tuple`;
+            }
+
             if (t.kind === "array") {
                 return "  array";
             }
@@ -824,6 +1155,40 @@ export class ElmRenderer extends ConvenienceRenderer {
         });
     }
 
+    private emitTupleHelpers(tuples: readonly TupleType[]): void {
+        this.emitLine("--- tuple helpers");
+        this.ensureBlankLine();
+        this.emitMultiline(`tupleOfLength : Int -> Maybe Int -> (Int -> Jdec.Decoder a) -> Jdec.Decoder a
+tupleOfLength x y f =
+    Jdec.list Jdec.value
+        |> Jdec.andThen (\\m ->
+            if List.length m < x || Maybe.withDefault False (Maybe.map (\\r -> List.length m > r) y) then
+                Jdec.fail ("Unexpected number of tuple elements: " ++ String.fromInt (List.length m))
+            else
+                f (List.length m))`);
+        if (tuples.some((t) => t.minItems < t.items.length)) {
+            this.ensureBlankLine();
+            this.emitMultiline(`optionalTupleItem : Int -> Int -> Jdec.Decoder a -> Jdec.Decoder (Maybe a)
+optionalTupleItem m x decoder =
+    if x < m then Jdec.map Just (Jdec.index x decoder) else Jdec.succeed Nothing
+
+presentTupleItems : List (Maybe Jenc.Value) -> List Jenc.Value
+presentTupleItems m =
+    case m of
+        (Just x) :: y -> x :: presentTupleItems y
+        _ -> []`);
+        }
+
+        if (tuples.some((t) => t.rest !== undefined)) {
+            this.ensureBlankLine();
+            this.emitMultiline(`tupleRestItems : Int -> Int -> Jdec.Decoder a -> Jdec.Decoder (List a)
+tupleRestItems m x decoder =
+    List.foldr (\\y r -> Jdec.map2 (::) (Jdec.index y decoder) r) (Jdec.succeed []) (List.range x (m - 1))`);
+        }
+
+        this.ensureBlankLine();
+    }
+
     protected emitSourceStructure(): void {
         const exports: Sourcelike[] = [];
         const topLevelDecoders: Sourcelike[] = [];
@@ -836,13 +1201,14 @@ export class ElmRenderer extends ConvenienceRenderer {
             }
 
             topLevelDecoders.push(decoder);
-            // A top-level custom type, an enum, a union or a record that
-            // contains itself, exposes its constructors, as the other
-            // custom types do.
+            // A top-level custom type, an enum, a union, a record that
+            // contains itself or a tuple that's a custom type, exposes its
+            // constructors, as the other custom types do.
             const isCustomType =
                 t instanceof EnumType ||
                 (t instanceof UnionType && nullableFromUnion(t) === null) ||
-                (t instanceof ClassType && this.classIsCustomType(t));
+                (t instanceof ClassType && this.classIsCustomType(t)) ||
+                (t instanceof TupleType && this.tupleForm(t) === "custom");
             exports.push(
                 isCustomType ? [name, "(..)"] : name,
                 encoder,
@@ -858,6 +1224,18 @@ export class ElmRenderer extends ConvenienceRenderer {
         });
         this.forEachUnion("none", (t, name) => {
             if (!mapContains(this.topLevels, t)) exports.push([name, "(..)"]);
+        });
+        const tuples: TupleType[] = [];
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (t, name) => {
+            tuples.push(t);
+            if (mapContains(this.topLevels, t) || !this.tupleIsDeclared(t)) {
+                return;
+            }
+
+            exports.push(
+                this.tupleForm(t) === "custom" ? [name, "(..)"] : name,
+            );
         });
 
         if (this.leadingComments !== undefined) {
@@ -951,6 +1329,8 @@ import Dict exposing (Dict)`);
                 this.emitEnumDefinition(e, enumName),
             (u: UnionType, unionName: Name) =>
                 this.emitUnionDefinition(u, unionName),
+            (t: TupleType, tupleName: Name) =>
+                this.emitTupleDefinition(t, tupleName),
         );
 
         if (this._options.justTypes) return;
@@ -976,8 +1356,14 @@ import Dict exposing (Dict)`);
                 this.emitEnumFunctions(e, enumName),
             (u: UnionType, unionName: Name) =>
                 this.emitUnionFunctions(u, unionName),
+            (t: TupleType, tupleName: Name) =>
+                this.emitTupleFunctions(t, tupleName),
         );
         this.ensureBlankLine();
+
+        if (tuples.length > 0) {
+            this.emitTupleHelpers(tuples);
+        }
 
         this.emitLine("--- encoder helpers");
         this.ensureBlankLine();

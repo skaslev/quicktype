@@ -64,8 +64,7 @@ describe("recursive unions", () => {
 });
 
 // Like a Redis COMMAND INFO reply: a node is a name, its leaves and its
-// child nodes.  The tuple becomes an array of the union of its items, which
-// contains itself through arrays.
+// child nodes.
 const tree = {
     type: "object",
     properties: { root: { $ref: "#/$defs/node" } },
@@ -94,21 +93,21 @@ const tree = {
 };
 
 describe("recursive tuples", () => {
-    test("keep their reference to themselves", async () => {
+    // Elm keeps tuples, so the node is a custom type that refers to itself,
+    // and its decoder is a function of the array's length, which can refer
+    // to itself without Jdec.lazy.
+    test("are custom types that refer to themselves", async () => {
         const output = await renderSchema(tree, { "just-types": true });
-        expect(output).toContain("= LeafInPurpleNode Leaf");
         expect(output).toContain(
-            "| UnionArrayInTopLevelNode (List PurpleNode)",
-        );
-        expect(output).toContain(
-            "| UnionArrayInPurpleNode (List TopLevelNode)",
+            "= Node String (Maybe (List Leaf)) (Maybe (List Node))",
         );
     });
 
-    test("are decoded lazily", async () => {
+    test("are decoded through the length check", async () => {
         const output = await renderSchema(tree);
+        expect(output).toContain("tupleOfLength 1 (Just 3) (\\m ->");
         expect(output).toContain(
-            "Jdec.map UnionArrayInTopLevelNode (Jdec.lazy (\\_ -> Jdec.list purpleNode ))",
+            "|> Jpipe.custom (optionalTupleItem m 2 (Jdec.list node )))",
         );
     });
 });
