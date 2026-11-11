@@ -89,3 +89,46 @@ describe("unions of arrays with transformed members", () => {
         );
     });
 });
+
+// Arrays are kept apart by the types their items decode into.
+describe("unions of arrays of transformed items", () => {
+    // The items of the first array, integer and UUID strings, are a union
+    // that becomes a transformed type, which unions after
+    // MakeTransformations don't take for any type.
+    test("stay apart after transformations", async () => {
+        const output = await renderSchema(
+            withV([
+                arrayOf({ type: "string", format: "integer" }),
+                arrayOf({ type: "string", format: "uuid" }),
+                arrayOf(a),
+            ]),
+        );
+        expect(output).toContain("    v: list[int | UUID] | list[A]\n");
+        expect(output).toContain(
+            'v = from_union([lambda x: from_list(lambda x: from_union([lambda x: from_union([lambda x: int(x), lambda x: UUID(x)], from_str(x))], x), x), lambda x: from_list(A.from_dict, x)], obj["v"])',
+        );
+    });
+
+    // An array of integer strings and one of integers both decode into
+    // lists of integers, which can't be told apart to encode them.
+    test.each([
+        ["integer", "integer", "    v: list[int]\n"],
+        ["number", "integer", "    v: list[float | int]\n"],
+        ["boolean", "boolean", "    v: list[bool]\n"],
+    ])("an array of %s and one of %s strings are unified", async (type, format, expected) => {
+        const output = await renderSchema(
+            withV([arrayOf({ type }), arrayOf({ type: "string", format })]),
+        );
+        expect(output).toContain(expected);
+    });
+
+    test("an array of bool strings and one of numbers stay apart", async () => {
+        const output = await renderSchema(
+            withV([
+                arrayOf({ type: "string", format: "boolean" }),
+                arrayOf({ type: "number" }),
+            ]),
+        );
+        expect(output).toContain("    v: list[bool] | list[float]\n");
+    });
+});

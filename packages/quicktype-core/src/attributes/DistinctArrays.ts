@@ -1,8 +1,10 @@
 import { setIntersect, setUnionInto } from "collection-utils";
 
+import { followTargetType } from "../Transformers.js";
 import {
     type TypeKind,
     isPrimitiveStringTypeKind,
+    targetTypeKindForTransformedStringTypeKind,
 } from "../Type/TransformedStringType.js";
 import type { ArrayType, SetOperationType, Type } from "../Type/Type.js";
 
@@ -52,21 +54,31 @@ export function isDistinctArray(attributes: TypeAttributes): boolean {
     );
 }
 
-// The members of a union that are of the same key are unified into one.
-// This is coarser than what unions do: they keep the two number types apart
-// for some targets, and the transformed string types.
-function memberKey(kind: TypeKind): string {
-    if (kind === "integer" || kind === "double") return "number";
-    if (kind === "enum" || isPrimitiveStringTypeKind(kind)) return "string";
-    if (kind === "class" || kind === "map" || kind === "object") {
-        return "object";
+// The members of a union that share a key are unified into one.  This is
+// coarser than what unions do: they keep the two number types apart for some
+// targets, and the transformed string types.  An integer or a bool string is
+// a string in JSON, but decodes into an integer or a bool, and a union with
+// integers or bools makes it one member with them, so it has both keys.
+function keysOfKind(kind: TypeKind): string[] {
+    if (kind === "integer" || kind === "double") return ["number"];
+    if (kind === "enum") return ["string"];
+    if (isPrimitiveStringTypeKind(kind)) {
+        const target = targetTypeKindForTransformedStringTypeKind(kind);
+        if (target === undefined) return ["string"];
+        return ["string", ...keysOfKind(target)];
     }
 
-    return kind;
+    if (kind === "class" || kind === "map" || kind === "object") {
+        return ["object"];
+    }
+
+    return [kind];
 }
 
-// The non-union types making up `t`.
+// The non-union types making up `t`.  A transformed type, which
+// MakeTransformations makes, is taken for the type it decodes into.
 function unionMembers(t: Type, members: Set<Type>, seen: Set<Type>): Set<Type> {
+    t = followTargetType(t);
     if (seen.has(t)) return members;
     seen.add(t);
 
@@ -92,7 +104,7 @@ function possibleKeys(
     }
 
     if (t.kind !== "union" && t.kind !== "intersection") {
-        return new Set([memberKey(t.kind)]);
+        return new Set(keysOfKind(t.kind));
     }
 
     seen.add(t);
@@ -134,8 +146,10 @@ function membersConflict(a: Type, b: Type, seen: Set<string>): boolean {
     if (a.kind === "any" || a.kind === "none") return true;
     if (b.kind === "any" || b.kind === "none") return true;
 
-    const key = memberKey(a.kind);
-    if (key !== memberKey(b.kind)) return false;
+    // Objects and arrays have only their key.
+    const bKeys = keysOfKind(b.kind);
+    const key = keysOfKind(a.kind).find((k) => bKeys.includes(k));
+    if (key === undefined) return false;
     switch (key) {
         case "object":
             return (
