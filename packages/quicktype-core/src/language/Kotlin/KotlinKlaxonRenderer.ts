@@ -529,14 +529,31 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
     protected emitTopLevelPrimitive(t: PrimitiveType, name: Name): void {
         const typeName = this.sourcelikeToString(name);
         const valueType = this.sourcelikeToString(this.kotlinType(t));
+        // An `any` value is whatever Klaxon parses, `JsonObject`s and
+        // `JsonArray`s included.  `parseArray<Any?>` would throw on null and
+        // make objects bare `Object`s, and `toJsonString` takes no null and
+        // can't write a `JsonObject` or `JsonArray`.
+        const isAny = t.kind === "any" || t.kind === "null";
+        const parseAny = `klaxon.parseJsonArray(java.io.StringReader("[\${json}]"))[0]`;
         const parse =
             t.kind === "integer"
                 ? "json.toLong()"
                 : t.kind === "double"
                   ? "json.toDouble()"
-                  : `klaxon.parseArray<${valueType}>("[\${json}]")!![0]`;
+                  : t.kind === "any"
+                    ? parseAny
+                    : t.kind === "null"
+                      ? `${parseAny}.also { require(it == null) }`
+                      : `klaxon.parseArray<${valueType}>("[\${json}]")!![0]`;
+        const toJson = isAny
+            ? `when (value) {
+        null -> "null"
+        is JsonBase -> value.toJsonString()
+        else -> klaxon.toJsonString(value)
+    }`
+            : "klaxon.toJsonString(value)";
         this.emitMultiline(`data class ${typeName}(val value: ${valueType}) {
-    public fun toJson() = klaxon.toJsonString(value)
+    public fun toJson() = ${toJson}
 
     companion object {
         public fun fromJson(json: String) = ${typeName}(${parse})
