@@ -647,15 +647,17 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     // Copy-initializing a std::optional from the JSON doesn't use the
     // optional helper's adl_serializer, but the optional's converting
     // constructor, which reads the value type, so a nullable top level
-    // throws on null.  `get` always uses the adl_serializers.
+    // throws on null.  boost::variant's converting constructor takes the
+    // JSON, too, which converts to each of its alternatives, so it doesn't
+    // compile.  `get` always uses the adl_serializers.
     private topLevelNeedsGet(t: Type): boolean {
         if (!(t instanceof UnionType)) return false;
-        const [maybeNull] = removeNullFromUnion(t, true);
-        return (
-            maybeNull !== null &&
-            !this._options.boost &&
-            this.isOptionalAsValuePossible(t)
-        );
+        const [maybeNull, nonNulls] = removeNullFromUnion(t, true);
+        if (maybeNull === null) {
+            return this._options.boost && nonNulls.size > 1;
+        }
+
+        return !this._options.boost && this.isOptionalAsValuePossible(t);
     }
 
     protected finishFile(): void {

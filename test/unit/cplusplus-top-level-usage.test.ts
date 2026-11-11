@@ -2,8 +2,9 @@
 // types: `TopLevel data = nlohmann::json::parse(jsonString);`.  That
 // copy-initialization doesn't use the generated adl_serializers when the
 // type has a converting constructor that takes the JSON: std::optional's
-// reads the value type, so a nullable top level throws on null.  For those
-// types the comment says to use `get`.
+// reads the value type, so a nullable top level throws on null, and
+// boost::variant's is ambiguous, as the JSON converts to every alternative,
+// so it doesn't compile.  For those types the comment says to use `get`.
 
 import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
 import { describe, expect, test } from "vitest";
@@ -61,6 +62,41 @@ describe("C++ usage comment", () => {
         ["classes", object],
     ])("converts %s", async (_, schema) => {
         const output = await render(schema);
+        expect(output).toContain(implicit);
+    });
+
+    const recursiveUnion = {
+        $ref: "#/definitions/R",
+        definitions: {
+            R: {
+                anyOf: [
+                    { type: "string" },
+                    { type: "array", items: { $ref: "#/definitions/R" } },
+                ],
+            },
+        },
+    };
+
+    test.each([
+        [
+            "unions",
+            union,
+            "using TopLevel = boost::variant<int64_t, std::string>;",
+        ],
+        [
+            "recursive unions",
+            recursiveUnion,
+            "struct TopLevel : boost::variant<std::vector<TopLevel>, std::string> {",
+        ],
+    ])("reads boost::variant %s with get", async (_, schema, declaration) => {
+        const output = await render(schema, { boost: true });
+        expect(output).toContain(declaration);
+        expect(output).toContain(withGet);
+        expect(output).not.toContain(implicit);
+    });
+
+    test("converts classes with Boost", async () => {
+        const output = await render(object, { boost: true });
         expect(output).toContain(implicit);
     });
 
