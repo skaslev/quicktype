@@ -50,6 +50,16 @@ export class TypeAttributeKind<T> {
         return false;
     }
 
+    /**
+     * Whether the attribute restricts the values of a type, like
+     * `minLength`: the type without it has more values.  A union of types
+     * only some of which have it doesn't have it, see
+     * `unionTypeAttributes`.
+     */
+    public get isConstraint(): boolean {
+        return false;
+    }
+
     public requiresUniqueIdentity(_: T): boolean {
         return false;
     }
@@ -164,6 +174,22 @@ export function combineTypeAttributes(
     }
 
     return mapFilterMap(attributesByKind, combine);
+}
+
+/**
+ * The attributes of a union of types, from the attributes of each of them.
+ * Unlike `combineTypeAttributes("union", ...)`, which also adds attributes
+ * to those of a type, it leaves out the constraints that not all of them
+ * have, see `TypeAttributeKind.isConstraint`.
+ */
+export function unionTypeAttributes(
+    attributeArray: readonly TypeAttributes[],
+): TypeAttributes {
+    return mapFilter(
+        combineTypeAttributes("union", Array.from(attributeArray)),
+        (_, kind) =>
+            !kind.isConstraint || attributeArray.every((a) => a.has(kind)),
+    );
 }
 
 export function makeTypeAttributesInferred(

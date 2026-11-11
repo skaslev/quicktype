@@ -44,6 +44,10 @@ export class MinMaxConstraintTypeAttributeKind extends TypeAttributeKind<MinMaxC
         return true;
     }
 
+    public get isConstraint(): boolean {
+        return true;
+    }
+
     public combine(arr: MinMaxConstraint[]): MinMaxConstraint | undefined {
         assert(arr.length > 0);
 
@@ -219,6 +223,10 @@ export class PatternTypeAttributeKind extends TypeAttributeKind<string> {
     }
 
     public get inIdentity(): boolean {
+        return true;
+    }
+
+    public get isConstraint(): boolean {
         return true;
     }
 

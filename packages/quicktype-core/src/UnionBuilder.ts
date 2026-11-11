@@ -15,6 +15,7 @@ import {
     emptyTypeAttributes,
     increaseTypeAttributesDistance,
     makeTypeAttributesInferred,
+    unionTypeAttributes,
 } from "./attributes/TypeAttributes.js";
 import { assert, assertNever, defined, panic } from "./support/Support.js";
 import {
@@ -48,6 +49,7 @@ export interface UnionTypeProvider<TArrayData, TObjectData> {
 
 export type TypeAttributeMap<T extends TypeKind> = Map<T, TypeAttributes>;
 
+// The attributes of the members of each kind, one for each member.
 type TypeAttributeMapBuilder<T extends TypeKind> = Map<T, TypeAttributes[]>;
 
 function addAttributes(
@@ -78,7 +80,8 @@ function addAttributesToBuilder<T extends TypeKind>(
     if (arr === undefined) {
         arr = [];
         builder.set(kind, arr);
-    } else if (newAttributes.size === 0) {
+    } else if (newAttributes.size === 0 && arr.some((a) => a.size === 0)) {
+        // Another member without attributes adds nothing.
         return;
     }
 
@@ -88,9 +91,10 @@ function addAttributesToBuilder<T extends TypeKind>(
 function buildTypeAttributeMap<T extends TypeKind>(
     builder: TypeAttributeMapBuilder<T>,
 ): TypeAttributeMap<T> {
-    return mapMap(builder, (arr) => combineTypeAttributes("union", arr));
+    return mapMap(builder, (arr) => unionTypeAttributes(arr));
 }
 
+// Unifies the members of kind `fromKind` into those of kind `toKind`.
 function moveAttributes<T extends TypeKind>(
     map: TypeAttributeMap<T>,
     fromKind: T,
@@ -98,7 +102,13 @@ function moveAttributes<T extends TypeKind>(
 ): void {
     const fromAttributes = defined(map.get(fromKind));
     map.delete(fromKind);
-    setAttributes(map, toKind, fromAttributes);
+    const toAttributes = map.get(toKind);
+    map.set(
+        toKind,
+        toAttributes === undefined
+            ? fromAttributes
+            : unionTypeAttributes([toAttributes, fromAttributes]),
+    );
 }
 
 export class UnionAccumulator<TArray, TObject>
@@ -183,15 +193,14 @@ export class UnionAccumulator<TArray, TObject>
         addAttributesToBuilder(
             this._stringTypeAttributes,
             "string",
-            attributes,
+            stringTypesAttributes === undefined
+                ? attributes
+                : combineTypeAttributes(
+                      "union",
+                      attributes,
+                      stringTypesAttributes,
+                  ),
         );
-        if (stringTypesAttributes !== undefined) {
-            addAttributesToBuilder(
-                this._stringTypeAttributes,
-                "string",
-                stringTypesAttributes,
-            );
-        }
     }
 
     public addStringType(
@@ -204,14 +213,17 @@ export class UnionAccumulator<TArray, TObject>
             return;
         }
 
-        addAttributesToBuilder(this._stringTypeAttributes, kind, attributes);
-        if (stringTypes !== undefined) {
-            addAttributesToBuilder(
-                this._stringTypeAttributes,
-                kind,
-                stringTypesTypeAttributeKind.makeAttributes(stringTypes),
-            );
-        }
+        addAttributesToBuilder(
+            this._stringTypeAttributes,
+            kind,
+            stringTypes === undefined
+                ? attributes
+                : combineTypeAttributes(
+                      "union",
+                      attributes,
+                      stringTypesTypeAttributeKind.makeAttributes(stringTypes),
+                  ),
+        );
     }
 
     public addArray(t: TArray, attributes: TypeAttributes): void {

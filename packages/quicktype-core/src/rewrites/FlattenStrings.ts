@@ -1,16 +1,16 @@
 import { iterableFirst } from "collection-utils";
 
-import { combineTypeAttributes } from "../attributes/TypeAttributes.js";
+import {
+    combineTypeAttributes,
+    unionTypeAttributes,
+} from "../attributes/TypeAttributes.js";
 import type { GraphRewriteBuilder } from "../GraphRewriting.js";
 import { assert, defined } from "../support/Support.js";
 import type { PrimitiveType, Type, UnionType } from "../Type/Type.js";
 import type { StringTypeMapping } from "../Type/TypeBuilderUtils.js";
 import type { TypeGraph } from "../Type/TypeGraph.js";
 import type { TypeRef } from "../Type/TypeRef.js";
-import {
-    combineTypeAttributesOfTypes,
-    stringTypesForType,
-} from "../Type/TypeUtils.js";
+import { stringTypesForType } from "../Type/TypeUtils.js";
 
 // A union needs replacing if it contains more than one string type, one of them being
 // a basic string type.
@@ -35,9 +35,8 @@ function replaceUnion(
     assert(group.size === 1);
     const u = defined(iterableFirst(group));
     const stringMembers = defined(unionNeedsReplacing(u));
-    const stringAttributes = combineTypeAttributesOfTypes(
-        "union",
-        stringMembers,
+    const stringAttributes = unionTypeAttributes(
+        Array.from(stringMembers, (t) => t.getAttributes()),
     );
     const types: TypeRef[] = [];
     for (const t of u.members) {
