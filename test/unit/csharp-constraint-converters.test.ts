@@ -73,3 +73,45 @@ describe("C# converters of nullable array items", () => {
         }
     }
 });
+
+// Json.NET calls a property's converter for null too, and the converter
+// of an array of converted items calls the items' converter for every
+// item, null or not.  The converters of reference types (strings with
+// length bounds, arrays of converted items) have to read and write null
+// like those of value types do.
+describe("C# Json.NET converters of reference types", () => {
+    test("read and write null", async () => {
+        const output = await renderCSharp(
+            {
+                type: "object",
+                properties: {
+                    name: { type: ["string", "null"], maxLength: 5 },
+                    names: {
+                        type: ["array", "null"],
+                        items: { type: ["string", "null"], minLength: 1 },
+                    },
+                    count: { type: ["integer", "null"], maximum: 10 },
+                },
+                required: ["name", "names", "count"],
+            },
+            "NewtonSoft",
+        );
+        const converters = output
+            .split(/\n(?= {4}internal class )/)
+            .filter((c) => /^ {4}internal class \w+Converter\b/.test(c));
+        expect(converters.map((c) => c.split("\n")[0].trim())).toEqual([
+            "internal class MinMaxValueCheckConverter : JsonConverter",
+            "internal class PurpleMinMaxLengthCheckConverter : JsonConverter",
+            "internal class DecodeArrayConverter : JsonConverter",
+            "internal class FluffyMinMaxLengthCheckConverter : JsonConverter",
+        ]);
+        for (const converter of converters) {
+            expect(converter).toContain(
+                "if (reader.TokenType == JsonToken.Null) return null;",
+            );
+            expect(converter).toMatch(
+                /if \(untypedValue == null\)\s*\{\s*serializer\.Serialize\(writer, null\);\s*return;/,
+            );
+        }
+    });
+});

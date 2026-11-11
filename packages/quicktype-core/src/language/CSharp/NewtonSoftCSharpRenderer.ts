@@ -1145,6 +1145,11 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
 
                 this.emitCanConvert(canConvertExpr);
                 this.ensureBlankLine();
+                // Json.NET passes null to the converter, too: for a value
+                // type as `T?`, and for a reference type (a string with
+                // length bounds, an array of converted items), nullable or
+                // not, as the type itself.  A union decodes null itself.
+                const handleNull = !(targetType instanceof UnionType);
                 this.emitReadJson(() => {
                     // FIXME: It's unsatisfying that we need this.  The reason is that we not
                     // only match T, but also T?.  If we didn't, then the T in T? would not be
@@ -1152,7 +1157,7 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
                     // whether the type is a nullable?
                     // FIXME: This could duplicate one of the cases handled below in
                     // `emitDecodeTransformer`.
-                    if (haveNullable && !(targetType instanceof UnionType)) {
+                    if (handleNull) {
                         this.emitLine(
                             "if (reader.TokenType == JsonToken.Null) return null;",
                         );
@@ -1174,7 +1179,7 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
                 this.ensureBlankLine();
                 this.emitWriteJson("untypedValue", () => {
                     // FIXME: See above.
-                    if (haveNullable && !(targetType instanceof UnionType)) {
+                    if (handleNull) {
                         this.emitLine("if (untypedValue == null)");
                         this.emitBlock(() => {
                             this.emitLine(
