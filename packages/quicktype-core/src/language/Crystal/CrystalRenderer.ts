@@ -124,7 +124,7 @@ export class CrystalRenderer extends ConvenienceRenderer {
                 this.crystalType(mapType.values, withIssues),
                 ")",
             ],
-            (_enumType) => "String",
+            (enumType) => this.nameForNamedType(enumType),
             (unionType) => {
                 const nullable = nullableFromUnion(unionType);
 
@@ -187,6 +187,57 @@ export class CrystalRenderer extends ConvenienceRenderer {
         this.emitLine(line);
         this.indent(f);
         this.emitLine("end");
+    }
+
+    /**
+     * An enum with a member per case.  Crystal would read and write an
+     * enum as its member names, so the enum reads and writes the JSON
+     * values itself.  It says `::JSON` and no `Nil` because a member can
+     * have those names.
+     */
+    protected emitEnumDefinition(e: EnumType, enumName: Name): void {
+        this.emitDescription(this.descriptionForType(e));
+        const cases: Array<[Name, string]> = [];
+        this.forEachEnumCase(e, "none", (name, jsonName) => {
+            cases.push([name, crystalStringEscape(jsonName)]);
+        });
+        this.emitEnum(["enum ", enumName], () => {
+            for (const [name] of cases) {
+                this.emitLine(name);
+            }
+
+            this.ensureBlankLine();
+            this.emitLine("def self.new(pull : ::JSON::PullParser)");
+            this.indent(() => {
+                this.emitLine("case value = pull.read_string");
+                for (const [name, json] of cases) {
+                    this.emitLine('when "', json, '" then ', name);
+                }
+
+                this.emitLine(
+                    'else pull.raise "Unknown ',
+                    enumName,
+                    ' value: #{value.inspect}"',
+                );
+                this.emitLine("end");
+            });
+            this.emitLine("end");
+            this.ensureBlankLine();
+            this.emitLine("def to_json(json : ::JSON::Builder)");
+            this.indent(() => {
+                this.emitLine("json.string(");
+                this.indent(() => {
+                    this.emitLine("case self");
+                    for (const [name, json] of cases) {
+                        this.emitLine("in ", name, ' then "', json, '"');
+                    }
+
+                    this.emitLine("end");
+                });
+                this.emitLine(")");
+            });
+            this.emitLine("end");
+        });
     }
 
     protected emitUnion(u: UnionType, unionName: Name): void {
@@ -280,14 +331,15 @@ export class CrystalRenderer extends ConvenienceRenderer {
         this.forEachTopLevel(
             "leading",
             (t, name) => this.emitTopLevelAlias(t, name),
-            (t) =>
-                t.kind === "enum" ||
-                this.namedTypeToNameForTopLevel(t) === undefined,
+            (t) => this.namedTypeToNameForTopLevel(t) === undefined,
         );
 
         this.forEachObject(
             "leading-and-interposing",
             (c: ClassType, name: Name) => this.emitStructDefinition(c, name),
+        );
+        this.forEachEnum("leading-and-interposing", (e, name) =>
+            this.emitEnumDefinition(e, name),
         );
         this.forEachUnion("leading-and-interposing", (u, name) =>
             this.emitUnion(u, name),
