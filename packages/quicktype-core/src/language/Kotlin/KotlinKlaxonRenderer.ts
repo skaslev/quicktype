@@ -270,7 +270,193 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
         }
     }
 
+    /**
+     * Whether Klaxon's `parseArray` makes the elements of an array of `t`.
+     * It only knows their class, so it can't make lists or maps: it throws
+     * or leaves their elements unconverted.  It throws on null, and
+     * `toJsonString` leaves nulls out of lists.
+     */
+    private klaxonParsesArrayOf(t: Type): boolean {
+        if (t instanceof UnionType) {
+            return (
+                nullableFromUnion(t) === null &&
+                t.findMember("null") === undefined
+            );
+        }
+
+        return !["array", "map", "any", "null"].includes(t.kind);
+    }
+
+    /**
+     * A value of type `t` from `v`, a value Klaxon parsed: a string, a
+     * number, a boolean, a `JsonObject`, a `JsonArray` or null.  Throws if
+     * `v` isn't one.
+     */
+    private fromKlaxonValue(t: Type, v: string, depth: number): Sourcelike {
+        const element = `x${depth}`;
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable !== null) {
+                return [
+                    "(if (",
+                    v,
+                    " == null) null else ",
+                    this.fromKlaxonValue(nullable, v, depth),
+                    ")",
+                ];
+            }
+
+            const fromJson: Sourcelike = [
+                this.nameForNamedType(t),
+                ".fromJson(JsonValue(",
+                v,
+                ", null, null, klaxon))",
+            ];
+            // A `JsonValue` can't hold null.
+            const nullMember = t.findMember("null");
+            return nullMember === undefined
+                ? fromJson
+                : [
+                      "(if (",
+                      v,
+                      " == null) ",
+                      this.nameForNamedType(t),
+                      ".",
+                      this.nameForUnionMember(t, nullMember),
+                      "() else ",
+                      fromJson,
+                      ")",
+                  ];
+        }
+
+        return matchType<Sourcelike>(
+            t,
+            (_anyType) => v,
+            (_nullType) => [
+                "(if (",
+                v,
+                " == null) null else throw IllegalArgumentException())",
+            ],
+            (_boolType) => ["(", v, " as Boolean)"],
+            (_integerType) => [
+                "((",
+                v,
+                " as? Int)?.toLong() ?: ",
+                v,
+                " as Long)",
+            ],
+            (_doubleType) => ["(", v, " as Number).toDouble()"],
+            (_stringType) => ["(", v, " as String)"],
+            (arrayType) => [
+                "(",
+                v,
+                " as JsonArray<*>).map { ",
+                element,
+                " -> ",
+                this.fromKlaxonValue(arrayType.items, element, depth + 1),
+                " }",
+            ],
+            (classType) =>
+                classType.getProperties().size === 0
+                    ? ["(", v, " as JsonObject)"]
+                    : [
+                          "klaxon.parseFromJsonObject<",
+                          this.nameForNamedType(classType),
+                          ">(",
+                          v,
+                          " as JsonObject)!!",
+                      ],
+            (mapType) => [
+                "(",
+                v,
+                " as JsonObject).mapValues { (_, ",
+                element,
+                ") -> ",
+                this.fromKlaxonValue(mapType.values, element, depth + 1),
+                " }",
+            ],
+            (enumType) => [
+                this.nameForNamedType(enumType),
+                ".fromValue(",
+                v,
+                " as String)",
+            ],
+            (_unionType) => mustNotHappen(),
+            (transformedStringType) => {
+                switch (transformedStringType.kind) {
+                    case "date-time":
+                        return ["OffsetDateTime.parse(", v, " as String)"];
+                    case "date":
+                        return ["LocalDate.parse(", v, " as String)"];
+                    case "time":
+                        return ["OffsetTime.parse(", v, " as String)"];
+                    default:
+                        return ["(", v, " as String)"];
+                }
+            },
+        );
+    }
+
+    /** The JSON for `v`, a value of type `t`, nulls included. */
+    private klaxonJson(t: Type, v: string, depth: number): Sourcelike {
+        const element = `x${depth}`;
+        const nullable =
+            t instanceof UnionType ? nullableFromUnion(t) : undefined;
+        if (nullable !== undefined && nullable !== null) {
+            return [
+                "(if (",
+                v,
+                ' == null) "null" else ',
+                this.klaxonJson(nullable, v, depth),
+                ")",
+            ];
+        }
+
+        if (t instanceof ArrayType) {
+            return [
+                v,
+                '.joinToString(",", "[", "]") { ',
+                element,
+                " -> ",
+                this.klaxonJson(t.items, element, depth + 1),
+                " }",
+            ];
+        }
+
+        if (t instanceof MapType) {
+            return [
+                v,
+                '.entries.joinToString(",", "{", "}") { (k, ',
+                element,
+                ') -> klaxon.toJsonString(k) + ":" + ',
+                this.klaxonJson(t.values, element, depth + 1),
+                " }",
+            ];
+        }
+
+        if (t.kind === "any" || t.kind === "null") {
+            // Klaxon's `toJsonString` can't write its own `JsonObject`s
+            // and `JsonArray`s.
+            return [
+                "(when (",
+                v,
+                ') { null -> "null"; is JsonBase -> ',
+                v,
+                ".toJsonString(); else -> klaxon.toJsonString(",
+                v,
+                ") })",
+            ];
+        }
+
+        return ["klaxon.toJsonString(", v, ")"];
+    }
+
     protected emitTopLevelArray(t: ArrayType, name: Name): void {
+        if (!this.klaxonParsesArrayOf(t.items)) {
+            this.emitTopLevelArrayByElement(t, name);
+            return;
+        }
+
         const elementType = this.kotlinType(t.items);
         const parseType = t.items.kind === "integer" ? "Any" : elementType;
         const validate =
@@ -301,6 +487,39 @@ export class KotlinKlaxonRenderer extends KotlinRenderer {
                         ">(json)!!",
                         validate,
                         ")",
+                    );
+                });
+            },
+        );
+    }
+
+    // Klaxon can't make or write the elements itself, so they're converted
+    // one by one.
+    private emitTopLevelArrayByElement(t: ArrayType, name: Name): void {
+        const elementType = this.kotlinType(t.items);
+        this.emitBlock(
+            [
+                "class ",
+                name,
+                "(elements: Collection<",
+                elementType,
+                ">) : ArrayList<",
+                elementType,
+                ">(elements)",
+            ],
+            () => {
+                this.emitLine(
+                    "public fun toJson() = ",
+                    this.klaxonJson(t, "this", 0),
+                );
+                this.ensureBlankLine();
+                this.emitBlock("companion object", () => {
+                    this.emitLine(
+                        "public fun fromJson(json: String) = ",
+                        name,
+                        "(klaxon.parseJsonArray(java.io.StringReader(json)).map { x0 -> ",
+                        this.fromKlaxonValue(t.items, "x0", 1),
+                        " })",
                     );
                 });
             },
