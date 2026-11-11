@@ -1246,52 +1246,71 @@ end`);
                             if (isTopLevelArray) {
                                 const arrayElement = (topLevel as ArrayType)
                                     .items;
-                                const elementModule = arrayElement.isPrimitive()
-                                    ? ""
-                                    : this.nameForNamedTypeWithNamespace(
-                                          arrayElement,
-                                      );
-
-                                let isUnion = false;
-
-                                if (arrayElement instanceof UnionType) {
+                                // The functions that decode and encode an
+                                // element: a class's or an enum's module's,
+                                // or clauses of `decode_element` and
+                                // `encode_element` for the other elements
+                                // (unions, arrays, maps and primitives),
+                                // which have no module.  Free-form values
+                                // stay as they are.
+                                let convert: [Sourcelike, Sourcelike] | null =
+                                    null;
+                                if (arrayElement instanceof ClassType) {
+                                    const module =
+                                        this.nameForNamedTypeWithNamespace(
+                                            arrayElement,
+                                        );
+                                    convert = [
+                                        [module, ".from_map/1"],
+                                        [module, ".to_map/1"],
+                                    ];
+                                } else if (arrayElement instanceof EnumType) {
+                                    const module =
+                                        this.nameForNamedTypeWithNamespace(
+                                            arrayElement,
+                                        );
+                                    convert = [
+                                        [module, ".decode/1"],
+                                        [module, ".encode/1"],
+                                    ];
+                                } else if (arrayElement.kind !== "any") {
                                     this.emitPatternMatches(
-                                        [...arrayElement.getChildren()],
+                                        arrayElement instanceof UnionType
+                                            ? [...arrayElement.getChildren()]
+                                            : [arrayElement],
                                         "element",
                                         name,
                                     );
-                                    isUnion = true;
-                                } else if (arrayElement.isPrimitive()) {
-                                    this.emitPatternMatches(
-                                        [arrayElement],
-                                        "element",
-                                        name,
-                                        "",
-                                        false,
-                                        true,
-                                    );
-                                    isUnion = true;
+                                    convert = [
+                                        "decode_element/1",
+                                        "encode_element/1",
+                                    ];
                                 }
 
                                 this.emitBlock("def from_json(json) do", () => {
                                     this.emitLine("json");
                                     this.emitLine("|> Jason.decode!()");
-                                    this.emitLine(
-                                        "|> Enum.map(&",
-                                        isUnion
-                                            ? ["decode_element/1)"]
-                                            : [elementModule, ".from_map/1)"],
-                                    );
+                                    if (convert !== null) {
+                                        this.emitLine(
+                                            "|> Enum.map(&",
+                                            convert[0],
+                                            ")",
+                                        );
+                                    }
                                 });
 
                                 this.ensureBlankLine();
 
                                 this.emitBlock("def to_json(list) do", () => {
+                                    if (convert === null) {
+                                        this.emitLine("Jason.encode!(list)");
+                                        return;
+                                    }
+
                                     this.emitLine(
                                         "Enum.map(list, &",
-                                        isUnion
-                                            ? ["encode_element/1)"]
-                                            : [elementModule, ".to_map/1)"],
+                                        convert[1],
+                                        ")",
                                     );
                                     this.emitLine("|> Jason.encode!()");
                                 });
