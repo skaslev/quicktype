@@ -1,4 +1,4 @@
-import { iterableSome } from "collection-utils";
+import { iterableSome, setUnionInto } from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -13,6 +13,7 @@ import { camelCase, stringEscape } from "../../support/Strings.js";
 import { assert, defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
+    ArrayType,
     type ClassProperty,
     ClassType,
     type EnumType,
@@ -36,10 +37,30 @@ import {
     primitiveValueTypeKinds,
 } from "./utils.js";
 
+// The classes the elements of `t` are checked against, if it's an array: its
+// items, if they are classes, or the classes of their arrays and unions.
+function itemClasses(t: Type, seen: Set<Type>): Set<ClassType> {
+    const classes = new Set<ClassType>();
+    if (seen.has(t)) return classes;
+    seen.add(t);
+
+    if (t instanceof ClassType) {
+        classes.add(t);
+    } else if (t instanceof ArrayType) {
+        setUnionInto(classes, itemClasses(t.items, seen));
+    } else if (t instanceof UnionType) {
+        for (const m of t.members) setUnionInto(classes, itemClasses(m, seen));
+    }
+
+    return classes;
+}
+
 export class GoRenderer extends ConvenienceRenderer {
     private readonly _topLevelUnmarshalNames = new Map<Name, Name>();
 
     private readonly _topLevelMarshalNames = new Map<Name, Name>();
+
+    private _arrayClasses: ReadonlySet<Type> | undefined;
 
     private _currentFilename: string | undefined;
 
@@ -669,12 +690,16 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
     // checked, such as an unknown key in a nested object.  The class that
     // requires more of the object's properties is the more specific type
     // then, so classes with more required properties are tried first, and
-    // others in the order of the union.
+    // others in the order of the union.  A union with a single class decodes
+    // it like that, too, if it's a class of arrays, see `isArrayClass`.
     private unionClassesInTryOrder(u: UnionType): ClassType[] | undefined {
         const classes = Array.from(u.members).filter(
             (t): t is ClassType => t instanceof ClassType,
         );
-        if (classes.length < 2) return undefined;
+        if (classes.length === 0) return undefined;
+        if (classes.length === 1 && !this.isArrayClass(classes[0])) {
+            return undefined;
+        }
 
         const requiredCount = (c: ClassType): number =>
             Array.from(c.getProperties().values()).filter((p) => !p.isOptional)
@@ -682,11 +707,159 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         return classes.sort((a, b) => requiredCount(b) - requiredCount(a));
     }
 
+    // Whether `c` is a class of one of several arrays of classes of a union.
+    // A union only keeps such arrays apart if their classes don't allow
+    // additional properties, and encoding/json would take the objects of one
+    // for another, see `unionClassesInTryOrder`.  So those classes are
+    // decoded with `unmarshalClass` as elements of the arrays, see
+    // `elementPredicate`, and in unions, which the elements may be.
+    private isArrayClass(c: ClassType): boolean {
+        return this.arrayClasses.has(c);
+    }
+
+    private get arrayClasses(): ReadonlySet<Type> {
+        if (this._arrayClasses === undefined) {
+            const arrayClasses = new Set<Type>();
+            for (const u of this.typeGraph.allTypesUnordered()) {
+                if (!(u instanceof UnionType)) continue;
+                const classes = (this.unionArraysInTryOrder(u) ?? [])
+                    .map((a) => itemClasses(a, new Set()))
+                    .filter((s) => s.size > 0);
+                if (classes.length < 2) continue;
+                for (const s of classes) setUnionInto(arrayClasses, s);
+            }
+
+            this._arrayClasses = arrayClasses;
+        }
+
+        return this._arrayClasses;
+    }
+
     private get haveUnionsWithClasses(): boolean {
         return iterableSome(
             this.namedUnions,
             (u) => this.unionClassesInTryOrder(u) !== undefined,
         );
+    }
+
+    // The arrays of a union with several, which its `UnmarshalJSON` tries in
+    // turn, in the order of the union.  An array only takes a JSON array
+    // whose elements are all of its items, see `elementPredicate`, and a
+    // union only keeps arrays apart whose items can be told apart, so two
+    // arrays only take the same JSON array if it's empty, or if its elements
+    // are objects valid for classes of both, as with an `anyOf`, or invalid
+    // only in a way that isn't checked, such as an unknown key in a nested
+    // object.  The empty array is taken by the first array, which encodes
+    // it back as it was.
+    private unionArraysInTryOrder(u: UnionType): ArrayType[] | undefined {
+        const arrays = Array.from(u.members).filter(
+            (t): t is ArrayType => t instanceof ArrayType,
+        );
+        return arrays.length < 2 ? undefined : arrays;
+    }
+
+    private get haveUnionsWithArrays(): boolean {
+        return iterableSome(
+            this.namedUnions,
+            (u) => this.unionArraysInTryOrder(u) !== undefined,
+        );
+    }
+
+    // A function that tells whether a JSON value, an element of an array of
+    // a union with several, is of type `t` in the ways json.Unmarshal
+    // doesn't check, or `undefined` if there are none.  json.Unmarshal takes
+    // null for any type, so the element must not be null, unless `t` is
+    // nullable, and objects with unknown or missing keys for any class, so
+    // a class of arrays (see `isArrayClass`) must take it with
+    // `unmarshalClass`.  An array's elements are checked in turn.  A union
+    // decodes its values itself, see `unionValueCondition`.
+    private elementPredicate(
+        t: Type,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        const predicate = (body: Sourcelike): Sourcelike => [
+            "func(e []byte) bool { return ",
+            body,
+            " }",
+        ];
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable === null) {
+                const condition = this.unionValueCondition(t, seen);
+                return condition === undefined
+                    ? undefined
+                    : predicate(condition);
+            }
+
+            const condition = this.valueCondition(nullable, seen);
+            return condition === undefined
+                ? undefined
+                : predicate(['string(e) == "null" || ', condition]);
+        }
+
+        // A tuple checks its items, and rejects null, itself.
+        if (t.kind === "any" || t instanceof TupleType) return undefined;
+        if (t.kind === "null") return predicate('string(e) == "null"');
+        const condition = this.valueCondition(t, seen);
+        return condition === undefined ? "notNull" : predicate(condition);
+    }
+
+    // A condition on the JSON value `e` that isn't null, which a value of
+    // `t`, not a union, must meet, and json.Unmarshal doesn't check.
+    private valueCondition(
+        t: Type,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        if (t instanceof ClassType && this.isArrayClass(t)) {
+            return [
+                "unmarshalClass(e, new(",
+                this.goType(t),
+                "), ",
+                this.unmarshalClassArgs(t),
+                ")",
+            ];
+        }
+
+        if (t instanceof ArrayType) {
+            return [
+                "isArray(e, ",
+                this.elementPredicate(t.items, seen) ?? "nil",
+                ")",
+            ];
+        }
+
+        if (t instanceof UnionType) {
+            return this.unionValueCondition(t, seen);
+        }
+
+        return undefined;
+    }
+
+    // A union decodes its values itself: it rejects null unless it's
+    // nullable, and it tells its classes and arrays apart, if it has several
+    // or classes of arrays, and tries its tuples first.  But its one array,
+    // if it has one and no tuples, it decodes with json.Unmarshal, so the
+    // elements of that are checked here.
+    private unionValueCondition(
+        u: UnionType,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        if (
+            seen.has(u) ||
+            this.unionArraysInTryOrder(u) !== undefined ||
+            u.findMember("tuple") !== undefined
+        ) {
+            return undefined;
+        }
+
+        const array = u.findMember("array");
+        if (!(array instanceof ArrayType)) return undefined;
+        const predicate = this.elementPredicate(
+            array.items,
+            new Set([...seen, u]),
+        );
+        if (predicate === undefined) return undefined;
+        return ["!isArray(e, nil) || isArray(e, ", predicate, ")"];
     }
 
     // The arguments of `unmarshalClass` that describe the properties of `c`.
@@ -708,6 +881,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
     private emitUnion(u: UnionType, unionName: Name): void {
         this.startFile(unionName);
         const classes = this.unionClassesInTryOrder(u);
+        const arrays = this.unionArraysInTryOrder(u);
         const [hasNull, nonNulls] = removeNullFromUnion(u);
         const tuples: Array<[Name, TupleType]> = [];
         this.forEachUnionMember(u, nonNulls, "none", null, (fieldName, t) => {
@@ -720,7 +894,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                 imports.add("errors");
             }
 
-            if (tuples.length > 0) {
+            if (tuples.length > 0 || arrays !== undefined) {
                 imports.add("encoding/json");
                 if (this.unionArrayError(u, tuples)) imports.add("errors");
             }
@@ -749,6 +923,9 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             });
         };
 
+        // With tuples or several arrays, `unmarshalUnion` only captures an
+        // array, which is then decoded here, see `emitUnionArrayDecoding`.
+        const captureArray = tuples.length > 0 || arrays !== undefined;
         const makeArgs = (
             primitiveArg: (fieldName: Sourcelike) => Sourcelike,
             compoundArg: (
@@ -768,8 +945,11 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             }
 
             for (const kind of compoundTypeKinds) {
-                if (kind === "array" && arrayArg !== undefined) {
-                    args.push(arrayArg, ", ");
+                if (
+                    kind === "array" &&
+                    (arrayArg !== undefined || arrays !== undefined)
+                ) {
+                    args.push(arrayArg ?? "false, nil", ", ");
                     continue;
                 }
 
@@ -805,6 +985,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                 unionName,
                 classes,
                 tuples,
+                arrays,
                 makeArgs,
             );
             this.endFile();
@@ -815,6 +996,18 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             ["(x *", unionName, ") UnmarshalJSON(data []byte) error"],
             () => {
                 for (const kind of compoundTypeKinds) {
+                    if (kind === "array" && arrays !== undefined) {
+                        for (const a of arrays) {
+                            this.emitLine(
+                                "x.",
+                                this.nameForUnionMember(u, a),
+                                " = nil",
+                            );
+                        }
+
+                        continue;
+                    }
+
                     maybeAssignNil(kind);
                 }
 
@@ -825,16 +1018,14 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                 ifMember("class", undefined, (_1, _2, goType) => {
                     this.emitLine("var c ", goType);
                 });
-                // Tuples are JSON arrays, too: an array is captured to be
-                // decoded here.
-                if (tuples.length > 0) {
+                if (captureArray) {
                     this.emitLine("var array json.RawMessage");
                 }
 
                 const args = makeArgs(
                     (fn) => ["&x.", fn],
                     (isClass, fn) => (isClass ? "true, &c" : ["true, &x.", fn]),
-                    tuples.length > 0 ? "true, &array" : undefined,
+                    captureArray ? "true, &array" : undefined,
                 );
                 this.emitLine(
                     "object, err := unmarshalUnion(data, ",
@@ -849,9 +1040,9 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                         this.emitLine("x.", fieldName, " = &c");
                     });
                 });
-                if (tuples.length > 0) {
+                if (captureArray) {
                     this.emitBlock("if array != nil", () =>
-                        this.emitUnionArrayDecoding(u, tuples),
+                        this.emitUnionArrayDecoding(u, tuples, arrays),
                     );
                 }
 
@@ -870,6 +1061,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                     );
                 }
 
+                this.emitUnionArraysMarshal(u, arrays);
                 const args = makeArgs(
                     (fn) => ["x.", fn],
                     (_, fn) => ["x.", fn, " != nil, x.", fn],
@@ -890,6 +1082,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         unionName: Name,
         classes: readonly ClassType[],
         tuples: Array<[Name, TupleType]>,
+        arrays: readonly ArrayType[] | undefined,
         makeArgs: (
             primitiveArg: (fieldName: Sourcelike) => Sourcelike,
             compoundArg: (
@@ -917,9 +1110,10 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                     this.emitLine("x.", fieldName, " = nil");
                 }
 
-                // Tuples are JSON arrays, too: an array is captured to be
-                // decoded here.
-                if (tuples.length > 0) {
+                // Tuples and several arrays are JSON arrays, too: an array is
+                // captured to be decoded here.
+                const captureArray = tuples.length > 0 || arrays !== undefined;
+                if (captureArray) {
                     this.emitLine("var array json.RawMessage");
                 }
 
@@ -929,7 +1123,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                         isClass
                             ? "true, new(json.RawMessage)"
                             : ["true, &x.", fn],
-                    tuples.length > 0 ? "true, &array" : undefined,
+                    captureArray ? "true, &array" : undefined,
                 );
                 this.emitLine(
                     "object, err := unmarshalUnion(data, ",
@@ -964,9 +1158,9 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                         'return errors.New("Object does not match any class of the union")',
                     );
                 });
-                if (tuples.length > 0) {
+                if (captureArray) {
                     this.emitBlock("if array != nil", () =>
-                        this.emitUnionArrayDecoding(u, tuples),
+                        this.emitUnionArrayDecoding(u, tuples, arrays),
                     );
                 }
 
@@ -984,6 +1178,7 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                     );
                 }
 
+                this.emitUnionArraysMarshal(u, arrays);
                 this.forEachUnionMember(
                     u,
                     new Set(classes),
@@ -1009,12 +1204,14 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         );
     }
 
-    // Whether an array that matches none of the union's tuples is an error
-    // of its own: the union has several tuples and no array.
+    // Whether an array that matches none of the union's tuples and arrays is
+    // an error of its own: the union has several tuples and no array, or
+    // several arrays.
     private unionArrayError(
         u: UnionType,
         tuples: Array<[Name, TupleType]>,
     ): boolean {
+        if (this.unionArraysInTryOrder(u) !== undefined) return true;
         return tuples.length > 1 && u.findMember("array") === undefined;
     }
 
@@ -1025,7 +1222,13 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
     private emitUnionArrayDecoding(
         u: UnionType,
         tuples: Array<[Name, TupleType]>,
+        arrays: readonly ArrayType[] | undefined,
     ): void {
+        if (arrays !== undefined) {
+            this.emitUnionArraysDecoding(u, tuples, arrays);
+            return;
+        }
+
         const arrayMember = u.findMember("array");
         const candidates: Array<[Name, Type]> = [...tuples];
         if (arrayMember !== undefined) {
@@ -1071,6 +1274,66 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             this.emitLine("return json.Unmarshal(array, x.", lastName, ")");
         } else {
             this.emitLine("return json.Unmarshal(array, &x.", lastName, ")");
+        }
+    }
+
+    // The tuples of a union with several arrays are tried first, see
+    // `emitUnionArrayDecoding`, then the arrays in turn, see
+    // `unionArraysInTryOrder`.
+    private emitUnionArraysDecoding(
+        u: UnionType,
+        tuples: Array<[Name, TupleType]>,
+        arrays: readonly ArrayType[],
+    ): void {
+        for (const [fieldName, t] of tuples) {
+            this.emitBlock(
+                [
+                    "if t := new(",
+                    this.goType(t),
+                    "); json.Unmarshal(array, t) == nil",
+                ],
+                () => {
+                    this.emitLine("x.", fieldName, " = t");
+                    this.emitLine("return nil");
+                },
+            );
+        }
+
+        for (const a of arrays) {
+            const fieldName = this.nameForUnionMember(u, a);
+            this.emitBlock(
+                [
+                    "if a := new(",
+                    this.goType(a),
+                    "); unmarshalArray(array, a, ",
+                    this.elementPredicate(a.items, new Set()) ?? "nil",
+                    ")",
+                ],
+                () => {
+                    this.emitLine("x.", fieldName, " = *a");
+                    this.emitLine("return nil");
+                },
+            );
+        }
+
+        this.emitLine(
+            'return errors.New("Array does not match any ',
+            tuples.length > 0 ? "tuple or array" : "array",
+            ' of the union")',
+        );
+    }
+
+    // `marshalUnion` handles a single array, so the arrays of a union with
+    // several are encoded before it.
+    private emitUnionArraysMarshal(
+        u: UnionType,
+        arrays: readonly ArrayType[] | undefined,
+    ): void {
+        for (const a of arrays ?? []) {
+            const fieldName = this.nameForUnionMember(u, a);
+            this.emitBlock(["if x.", fieldName, " != nil"], () => {
+                this.emitLine("return json.Marshal(x.", fieldName, ")");
+            });
         }
     }
 
@@ -1279,7 +1542,7 @@ func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, 
 	}
 	return nil, errors.New("Union must not be null")
 }`);
-            if (this.haveUnionsWithClasses) {
+            if (this.haveUnionsWithClasses || this.arrayClasses.size > 0) {
                 this.ensureBlankLine();
                 this.emitMultiline(`// unmarshalClass decodes data into pc, a pointer to a struct, if data is an
 // object with all the required properties, no others but the optional ones,
@@ -1312,6 +1575,36 @@ func containsName(names []string, name string) bool {
 		}
 	}
 	return false
+}`);
+            }
+
+            if (this.haveUnionsWithArrays) {
+                this.ensureBlankLine();
+                this.emitMultiline(`// unmarshalArray decodes data into pa, a pointer to a slice, if data is an
+// array whose elements all satisfy isElement, unless that is nil.
+func unmarshalArray(data []byte, pa interface{}, isElement func([]byte) bool) bool {
+	return isArray(data, isElement) && json.Unmarshal(data, pa) == nil
+}
+
+// isArray tells whether data is an array whose elements all satisfy
+// isElement, unless that is nil.
+func isArray(data []byte, isElement func([]byte) bool) bool {
+	var elements []json.RawMessage
+	if json.Unmarshal(data, &elements) != nil || elements == nil {
+		return false
+	}
+	if isElement != nil {
+		for _, element := range elements {
+			if !isElement(element) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func notNull(data []byte) bool {
+	return string(data) != "null"
 }`);
             }
 
