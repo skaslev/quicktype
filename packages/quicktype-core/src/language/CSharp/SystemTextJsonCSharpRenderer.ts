@@ -874,7 +874,13 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
         varGen: { counter: number },
     ): boolean {
         for (const member of xfer.transformers) {
-            if (!member.canFail) {
+            // The array, which is last, is read directly, so that its own
+            // error is reported.
+            if (
+                !member.canFail ||
+                (member instanceof DecodingTransformer &&
+                    member.sourceType instanceof ArrayType)
+            ) {
                 let allHandled = false;
                 this.emitBlock(() => {
                     allHandled = this.emitDecodeTransformer(

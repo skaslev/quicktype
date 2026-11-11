@@ -254,10 +254,11 @@ function replaceUnion(
         );
     }
 
-    // A JSON array is the array member or one of the tuples.  With several
-    // of them, they're tried in turn, those that take fewer lengths first:
-    // fixed-length tuples, tuples with optional items, tuples with a rest,
-    // and the array last.
+    // A JSON array is one of the arrays or tuples (a union only has several
+    // arrays if it keeps them apart, see `distinctArrayGroups`).  With
+    // several of them, they're tried in turn, those that take fewer lengths
+    // first: fixed-length tuples, tuples with optional items, tuples with a
+    // rest, and the arrays last.
     const arrayMembers = arraySortByInto(
         Array.from(union.members).filter(
             (m) => m instanceof ArrayType || m instanceof TupleType,

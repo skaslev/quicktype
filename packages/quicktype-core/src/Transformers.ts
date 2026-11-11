@@ -13,6 +13,7 @@ import { TypeAttributeKind } from "./attributes/TypeAttributes.js";
 import type { BaseGraphRewriteBuilder } from "./GraphRewriting.js";
 import { assert, indentationString, panic } from "./support/Support.js";
 import {
+    ArrayType,
     ClassType,
     EnumType,
     PrimitiveType,
@@ -172,14 +173,15 @@ export class DecodingTransformer extends ProducerTransformer {
     }
 
     // A JSON value of the right type decodes into the one member of a union
-    // for that type, except for tuples and classes: a JSON array may have
-    // the wrong length, and then be the array or another tuple, and a union
-    // can have several classes, and a JSON object then is only of one of
-    // them.
+    // for that type, except for tuples, classes and arrays: a JSON array may
+    // have the wrong length, and then be an array or another tuple, and a
+    // union can have several classes or arrays, and a JSON object or array
+    // then is only of one of them.
     public get canFail(): boolean {
         return (
             this.sourceType instanceof TupleType ||
-            this.sourceType instanceof ClassType
+            this.sourceType instanceof ClassType ||
+            this.sourceType instanceof ArrayType
         );
     }
 

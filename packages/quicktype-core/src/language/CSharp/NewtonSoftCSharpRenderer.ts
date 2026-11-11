@@ -809,7 +809,9 @@ export class NewtonsoftCSharpRenderer extends CSharpRenderer {
                         emitFinish,
                     );
                 };
-                if (!member.canFail) {
+                // The array, which is last, is converted directly, so that
+                // its own error is reported.
+                if (!member.canFail || member.sourceType instanceof ArrayType) {
                     this.emitBlock(() => {
                         allHandled = convert();
                     });
