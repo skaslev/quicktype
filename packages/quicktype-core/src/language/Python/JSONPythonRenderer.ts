@@ -29,6 +29,7 @@ import {
     transformationForType,
 } from "../../Transformers.js";
 import {
+    ArrayType,
     type ClassType,
     TupleType,
     type Type,
@@ -277,6 +278,10 @@ export class JSONPythonRenderer extends PythonRenderer {
             ...converterFunctions.map(converterFunctionName),
         ];
     }
+
+    // Whether the encoders being made are for one of several arrays of a
+    // union, see `checkedEncoderInput`.
+    private _encodingUnionArrayItems = false;
 
     protected forbiddenForObjectProperties(c: ClassType, className: Name) {
         const result = super.forbiddenForObjectProperties(c, className);
@@ -1008,7 +1013,9 @@ export class JSONPythonRenderer extends PythonRenderer {
         if (xfer instanceof UnionMemberMatchTransformer) {
             const consumer = xfer.transformer;
             const vol = isType(xfer.memberType, inputTransformer);
-            return consume(consumer, vol);
+            return this.encodingMember(xfer.sourceType, xfer.memberType, () =>
+                consume(consumer, vol),
+            );
         }
         if (xfer instanceof ParseStringTransformer) {
             const consumer = xfer.consumer;
@@ -1059,12 +1066,16 @@ export class JSONPythonRenderer extends PythonRenderer {
         if (xfer instanceof StringifyTransformer) {
             const consumer = xfer.consumer;
             let vol: ValueOrLambda;
+            const checkedInput = this.checkedEncoderInput(
+                xfer.sourceType,
+                inputTransformer,
+            );
             switch (xfer.sourceType.kind) {
                 case "integer":
-                    vol = compose(inputTransformer, (v) => ["str(", v, ")"]);
+                    vol = compose(checkedInput, (v) => ["str(", v, ")"]);
                     break;
                 case "bool":
-                    vol = compose(inputTransformer, (v) => [
+                    vol = compose(checkedInput, (v) => [
                         "str(",
                         v,
                         ").lower()",
@@ -1091,6 +1102,53 @@ export class JSONPythonRenderer extends PythonRenderer {
         }
 
         return panic(`Transformer ${xfer.kind} is not supported`);
+    }
+
+    // Makes the encoder of `member` of `union` with `f`, see
+    // `checkedEncoderInput`.
+    private encodingMember<T>(union: UnionType, member: Type, f: () => T): T {
+        const arrays = Array.from(union.members).filter(
+            (m) => m instanceof ArrayType,
+        );
+        if (!(member instanceof ArrayType) || arrays.length < 2) return f();
+
+        const encodingUnionArrayItems = this._encodingUnionArrayItems;
+        this._encodingUnionArrayItems = true;
+        try {
+            return f();
+        } finally {
+            this._encodingUnionArrayItems = encodingUnionArrayItems;
+        }
+    }
+
+    // `from_union` takes the first member of a union whose encoder takes a
+    // value, so the encoder of one of several arrays of a union must reject
+    // the lists of the others, and the encoders of its items their items.
+    // Most encoders check the type of their value, but `str` of a UUID, or
+    // of an integer or a boolean encoded as a string, takes any value (and
+    // `is_type(int, x)`, for the integer member of a transformed union,
+    // takes booleans), so there `value` is checked first.  Numbers are
+    // encoded with `from_float` there, since `to_float` takes booleans,
+    // which are integers in Python.
+    private checkedEncoderInput(t: Type, value: ValueOrLambda): ValueOrLambda {
+        if (!this._encodingUnionArrayItems) return value;
+        switch (t.kind) {
+            case "integer":
+                return this.convFn("int", value);
+            case "bool":
+                return this.convFn("bool", value);
+            case "uuid":
+                return compose(value, (v) => [
+                    this.conv("is-type"),
+                    "(",
+                    this.typeObject(t),
+                    ", ",
+                    v,
+                    ")",
+                ]);
+            default:
+                return value;
+        }
     }
 
     private unionMembers(unionType: UnionType): Type[] {
@@ -1277,7 +1335,11 @@ export class JSONPythonRenderer extends PythonRenderer {
             (_nullType) => this.convFn("none", value),
             (_boolType) => this.convFn("bool", value),
             (_integerType) => this.convFn("int", value),
-            (_doubleType) => this.convFn("to-float", value),
+            (_doubleType) =>
+                this.convFn(
+                    this._encodingUnionArrayItems ? "from-float" : "to-float",
+                    value,
+                ),
             (_stringType) => this.convFn("str", value),
             (arrayType) =>
                 compose(value, (v) => [
@@ -1319,7 +1381,12 @@ export class JSONPythonRenderer extends PythonRenderer {
                 ]),
             (unionType) => {
                 const serializers = this.unionMembers(unionType).map(
-                    (m) => makeLambda(this.serializer(identity, m)).source,
+                    (m) =>
+                        makeLambda(
+                            this.encodingMember(unionType, m, () =>
+                                this.serializer(identity, m),
+                            ),
+                        ).source,
                 );
                 return compose(value, (v) => [
                     this.conv("union"),
@@ -1340,7 +1407,10 @@ export class JSONPythonRenderer extends PythonRenderer {
                 }
 
                 if (transformedStringType.kind === "uuid") {
-                    return compose(value, (v) => ["str(", v, ")"]);
+                    return compose(
+                        this.checkedEncoderInput(transformedStringType, value),
+                        (v) => ["str(", v, ")"],
+                    );
                 }
 
                 return panic(

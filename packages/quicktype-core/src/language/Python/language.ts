@@ -153,6 +153,21 @@ export class PythonTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    // `list[A] | list[B]` (`Union[List[A], List[B]]` before 3.10), except
+    // for pydantic: pydantic 1 takes the first member of a union that
+    // validates a value, converting strings, numbers and booleans into each
+    // other, so `Union[List[str], List[int]]` takes `[1, 2]` as `["1",
+    // "2"]`.  (pydantic 2 tries the members in strict mode first.)
+    public getSupportsUnionsWithMultipleArrays(
+        rendererOptions: Record<string, unknown> = {},
+    ): boolean {
+        const options = getOptionValues(
+            pythonOptions,
+            rendererOptions as RendererOptions<"python">,
+        );
+        return !options.pydanticBaseModel;
+    }
+
     public needsTransformerForType(t: Type): boolean {
         if (t instanceof UnionType) {
             return iterableSome(t.members, (m) =>

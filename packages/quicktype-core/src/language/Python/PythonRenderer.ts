@@ -39,6 +39,25 @@ import {
 import type { pythonOptions } from "./language.js";
 import { classNameStyle, snakeNameStyle } from "./utils.js";
 
+// The classes the elements of `t` are converted with, if it's an array: its
+// items, if they are classes, or the classes of their arrays and unions.
+function itemClasses(t: Type, seen: Set<Type>): Set<ClassType> {
+    const classes = new Set<ClassType>();
+    t = followTargetType(t);
+    if (seen.has(t)) return classes;
+    seen.add(t);
+
+    if (t instanceof ClassType) {
+        classes.add(t);
+    } else if (t instanceof ArrayType) {
+        setUnionInto(classes, itemClasses(t.items, seen));
+    } else if (t instanceof UnionType) {
+        for (const m of t.members) setUnionInto(classes, itemClasses(m, seen));
+    }
+
+    return classes;
+}
+
 export class PythonRenderer extends ConvenienceRenderer {
     private readonly imports: Map<string, Set<string>> = new Map();
 
@@ -475,9 +494,10 @@ export class PythonRenderer extends ConvenienceRenderer {
         return result;
     }
 
-    // Whether `c` is one of several classes of a union.  A union only has
-    // several classes if they don't allow additional properties, so their
-    // values can be told apart by their properties.
+    // Whether `c` is one of several classes of a union, or a class of one of
+    // several arrays of classes of a union.  A union only keeps classes
+    // apart, or arrays of classes, if they don't allow additional
+    // properties, so their values can be told apart by their properties.
     protected isUnionClass(c: ClassType): boolean {
         if (this._unionClasses === undefined) {
             const unionClasses = new Set<Type>();
@@ -486,8 +506,17 @@ export class PythonRenderer extends ConvenienceRenderer {
                 const classes = Array.from(t.members).filter(
                     (m) => m instanceof ClassType,
                 );
-                if (classes.length < 2) continue;
-                for (const m of classes) unionClasses.add(m);
+                if (classes.length >= 2) {
+                    for (const m of classes) unionClasses.add(m);
+                }
+
+                const arrayClasses = Array.from(t.members)
+                    .filter((m) => m instanceof ArrayType)
+                    .map((m) => itemClasses(m, new Set()))
+                    .filter((s) => s.size > 0);
+                if (arrayClasses.length >= 2) {
+                    for (const s of arrayClasses) setUnionInto(unionClasses, s);
+                }
             }
 
             this._unionClasses = unionClasses;
