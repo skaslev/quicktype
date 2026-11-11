@@ -15,6 +15,7 @@ import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
 } from "../../Type/index.js";
+import type { TupleSupport } from "../../Type/Type.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
 
@@ -83,6 +84,11 @@ export class JavaScriptTargetLanguage extends TargetLanguage<
 
     public get supportsFullObjectType(): boolean {
         return true;
+    }
+
+    // The runtime checks validate every tuple shape.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "javascript">(

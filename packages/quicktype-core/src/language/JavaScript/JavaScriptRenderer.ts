@@ -101,23 +101,42 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
             return undefined;
         }
 
-        // Like `directlyReachableSingleNamedType`, but a recursive union
-        // is named even if it's nullable, so this stops at it instead of
-        // going around its cycle.
-        const definedTypes = directlyReachableTypes(type, (t) =>
-            t instanceof UnionType
-                ? this.unionNeedsName(t)
-                    ? new Set([t])
-                    : null
-                : isNamedType(t)
-                  ? new Set([t])
-                  : null,
-        );
+        // Like `directlyReachableSingleNamedType`, but tuples end the search:
+        // none of a tuple's item types is the top-level's own, and a
+        // recursive tuple would never end it.  A named tuple is itself the
+        // top-level's named type.  So is a recursive union, even if it's
+        // nullable.
+        const namedTypes = directlyReachableTypes(type, (t) => {
+            if (t instanceof TupleType) {
+                return new Set(this.tupleNeedsName(t) ? [t] : []);
+            }
+
+            if (t instanceof UnionType) {
+                return this.unionNeedsName(t) ? new Set([t]) : null;
+            }
+
+            return isNamedType(t) ? new Set([t]) : null;
+        });
         assert(
-            definedTypes.size <= 1,
+            namedTypes.size <= 1,
             "Cannot have more than one defined type per top-level",
         );
-        return iterableFirst(definedTypes);
+        return iterableFirst(namedTypes);
+    }
+
+    // Tuples are spelled out in the type map, unless the schema names them
+    // or they contain themselves, which only a reference by name can
+    // express.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return (
+            this.hasGivenName(t) ||
+            this.isInCycleThrough(
+                t,
+                (c) =>
+                    !["class", "object", "enum"].includes(c.kind) &&
+                    !(c instanceof TupleType && this.hasGivenName(c)),
+            )
+        );
     }
 
     protected unionNeedsName(u: UnionType): boolean {
