@@ -92,6 +92,10 @@ export class RustTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsUnionsWithMultipleArrays(): boolean {
+        return true;
+    }
+
     /**
      * The range of whole numbers the generated integer type can
      * represent.  With `integer-type: force-i32` every integer renders

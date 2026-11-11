@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import { arrayIntercalate, iterableSome, mapFirst } from "collection-utils";
+import {
+    arrayIntercalate,
+    iterableSome,
+    mapFirst,
+    setUnionInto,
+} from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -18,6 +23,7 @@ import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import { defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
 import {
+    ArrayType,
     ClassType,
     type EnumType,
     TupleType,
@@ -60,6 +66,24 @@ function expectedTupleLength(t: TupleType): string {
     return min === 0
         ? `an array of at most ${elements(max)}`
         : `an array of ${min} to ${max} elements`;
+}
+
+// The classes the elements of `t` are checked against, if it's an array: its
+// items, if they are classes, or the classes of their arrays and unions.
+function itemClasses(t: Type, seen: Set<Type>): Set<ClassType> {
+    const classes = new Set<ClassType>();
+    if (seen.has(t)) return classes;
+    seen.add(t);
+
+    if (t instanceof ClassType) {
+        classes.add(t);
+    } else if (t instanceof ArrayType) {
+        setUnionInto(classes, itemClasses(t.items, seen));
+    } else if (t instanceof UnionType) {
+        for (const m of t.members) setUnionInto(classes, itemClasses(m, seen));
+    }
+
+    return classes;
 }
 
 export class RustRenderer extends ConvenienceRenderer {
@@ -469,17 +493,19 @@ export class RustRenderer extends ConvenienceRenderer {
     }
 
     // Whether the struct of `c` rejects unknown fields: if `c` is one of
-    // several classes of a union, or a class that one of them contains
-    // whose schema doesn't allow additional properties either.  serde
-    // tries the variants of an untagged enum in turn, and a struct ignores
-    // unknown fields by default, so it would take the values of the other
-    // structs, too, if it doesn't require any of their fields, or if the
-    // structs it contains take the values of theirs.  A union only has
-    // several classes if they don't allow additional properties, so their
-    // structs reject unknown fields, and so do the structs they contain
-    // that don't allow them, at any depth: every variant only takes values
-    // of its own.  The classes they contain that allow additional
-    // properties take any of them, as their schemas say.
+    // several classes of a union, or a class of one of several arrays of
+    // classes of a union, or a class that one of them contains whose schema
+    // doesn't allow additional properties either.  serde tries the variants
+    // of an untagged enum in turn, and a struct ignores unknown fields by
+    // default, so it would take the values of the other structs, too, if it
+    // doesn't require any of their fields, and a `Vec` of it the arrays of
+    // them, or if the structs it contains take the values of theirs.  A
+    // union only keeps classes apart, or arrays of classes, if they don't
+    // allow additional properties, so their structs reject unknown fields,
+    // and so do the structs they contain that don't allow them, at any
+    // depth: every variant only takes values of its own.  The classes they
+    // contain that allow additional properties take any of them, as their
+    // schemas say.
     private rejectsUnknownFields(c: ClassType): boolean {
         if (this._strictClasses === undefined) {
             const strictClasses = new Set<Type>();
@@ -488,8 +514,18 @@ export class RustRenderer extends ConvenienceRenderer {
                 const classes = Array.from(t.members).filter(
                     (m) => m instanceof ClassType,
                 );
-                if (classes.length < 2) continue;
-                for (const m of classes) strictClasses.add(m);
+                if (classes.length >= 2) {
+                    for (const m of classes) strictClasses.add(m);
+                }
+
+                const arrayClasses = Array.from(t.members)
+                    .filter((m) => m instanceof ArrayType)
+                    .map((m) => itemClasses(m, new Set()))
+                    .filter((s) => s.size > 0);
+                if (arrayClasses.length >= 2) {
+                    for (const s of arrayClasses)
+                        setUnionInto(strictClasses, s);
+                }
             }
 
             const seen = new Set<Type>();
