@@ -1,5 +1,6 @@
 // Elm full-mode output: top-level enums and unions expose their
-// constructors, and records that contain themselves are custom types.
+// constructors, records that contain themselves are custom types, and
+// absent optional properties aren't written as null.
 
 import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
 import { describe, expect, test } from "vitest";
@@ -199,5 +200,56 @@ describe("Elm records that contain themselves", () => {
         expect(output).toContain("(\\x0 x1 -> TopLevel {");
         expect(output).not.toMatch(/^x0 /m);
         expect(output).not.toMatch(/^x1 /m);
+    });
+});
+
+describe("Elm optional properties", () => {
+    const optionals = {
+        type: "object",
+        properties: {
+            n: { type: "integer" },
+            opt: { type: "string" },
+            optUnion: { oneOf: [{ type: "string" }, { type: "integer" }] },
+            optNullable: { type: ["string", "null"] },
+            optAny: {},
+        },
+        required: ["n"],
+        additionalProperties: false,
+    };
+
+    test("are left out if they're Nothing and not nullable", async () => {
+        const output = await render(optionals);
+        expect(output).toContain(
+            [
+                "encodeTopLevel x =",
+                "    Jenc.object <| List.filterMap identity",
+                '        [ Just ("n", Jenc.int x.n)',
+                '        , Maybe.map (\\y -> ("opt", Jenc.string y)) x.opt',
+                '        , Just ("optAny", makeNullableEncoder identity x.optAny)',
+                '        , Just ("optNullable", makeNullableEncoder Jenc.string x.optNullable)',
+                '        , Maybe.map (\\y -> ("optUnion", encodeOptUnion y)) x.optUnion',
+                "        ]",
+            ].join("\n"),
+        );
+    });
+
+    test("don't change records without such properties", async () => {
+        const output = await render({
+            type: "object",
+            properties: {
+                n: { type: "integer" },
+                optNullable: { type: ["string", "null"] },
+            },
+            required: ["n"],
+        });
+        expect(output).toContain(
+            [
+                "encodeTopLevel x =",
+                "    Jenc.object",
+                '        [ ("n", Jenc.int x.n)',
+                '        , ("optNullable", makeNullableEncoder Jenc.string x.optNullable)',
+                "        ]",
+            ].join("\n"),
+        );
     });
 });

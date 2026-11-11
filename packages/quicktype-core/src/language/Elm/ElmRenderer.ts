@@ -650,24 +650,49 @@ export class ElmRenderer extends ConvenienceRenderer {
         } else {
             this.emitLine(encoderName, " x =");
         }
+        // An optional property that's `Nothing` is left out: null isn't
+        // valid for it, and its decoder rejects it.  Unless it's nullable:
+        // Elm can't tell its absence from null, and null is valid for it.
+        const leftOutIfNothing = (p: ClassProperty): boolean =>
+            p.isOptional && !p.type.isNullable;
+        const leavesOut = Array.from(c.getProperties().values()).some(
+            leftOutIfNothing,
+        );
         this.indent(() => {
-            this.emitLine("Jenc.object");
+            this.emitLine(
+                "Jenc.object",
+                leavesOut ? " <| List.filterMap identity" : "",
+            );
             this.indent(() => {
                 let onFirst = true;
                 this.forEachClassProperty(c, "none", (name, jsonName, p) => {
                     const bracketOrComma = onFirst ? "[" : ",";
+                    const key = ['"', elmStringEscape(jsonName), '"'];
+                    onFirst = false;
+                    if (leftOutIfNothing(p)) {
+                        this.emitLine(
+                            bracketOrComma,
+                            " Maybe.map (\\y -> (",
+                            key,
+                            ", ",
+                            this.encoderNameForType(p.type, true).source,
+                            " y)) x.",
+                            name,
+                        );
+                        return;
+                    }
+
                     const propEncoder = this.encoderNameForProperty(p).source;
                     this.emitLine(
                         bracketOrComma,
-                        ' ("',
-                        elmStringEscape(jsonName),
-                        '", ',
+                        leavesOut ? " Just (" : " (",
+                        key,
+                        ", ",
                         propEncoder,
                         " x.",
                         name,
                         ")",
                     );
-                    onFirst = false;
                 });
                 if (onFirst) {
                     this.emitLine("[");
