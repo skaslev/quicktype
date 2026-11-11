@@ -782,9 +782,16 @@ export class ElmRenderer extends ConvenienceRenderer {
                         if (t.kind === "null") {
                             this.emitLine(bracketOrComma, " Jdec.null ", name);
                         } else {
-                            const decoder = parenIfNeeded(
-                                this.decoderNameForType(t),
-                            );
+                            // Elm rejects a value that is defined in terms of
+                            // itself, so a member that contains the union is
+                            // decoded lazily.
+                            const decoder = this.containsType(t, u)
+                                ? [
+                                      "(Jdec.lazy (\\_ -> ",
+                                      this.decoderNameForType(t).source,
+                                      "))",
+                                  ]
+                                : parenIfNeeded(this.decoderNameForType(t));
                             this.emitLine(
                                 bracketOrComma,
                                 " Jdec.map ",
