@@ -96,3 +96,47 @@ describe("Dart Hive adapters", () => {
         expect(output).not.toContain("@Hive");
     });
 });
+
+const parts = (output: string): string[] =>
+    output.split("\n").filter((l) => l.startsWith("part "));
+
+const generated = "part 'top_level.g.dart';";
+const freezed = "part 'top_level.freezed.dart';";
+
+describe("Dart part directives", () => {
+    const anEnum = { enum: ["a", "b-c"] };
+    const aString = { type: "string" };
+    const integers = { type: "array", items: { type: "integer" } };
+    const aMap = { type: "object", additionalProperties: { type: "integer" } };
+
+    test.each([
+        ["an enum", "use-json-annotation", anEnum],
+        ["an enum", "use-freezed", anEnum],
+        ["a string", "use-json-annotation", aString],
+        ["a string", "use-freezed", aString],
+        ["a string", "use-hive", aString],
+        ["an array of integers", "use-freezed", integers],
+        ["an array of integers", "use-hive", integers],
+        ["a map of integers", "use-json-annotation", aMap],
+    ])("none for %s with --%s", async (_what, option, schema) => {
+        const output = await renderSchema(schema, { [option]: true });
+        expect(parts(output)).toEqual([]);
+    });
+
+    test("an enum's Hive adapter", async () => {
+        const output = await renderSchema(anEnum, {
+            "use-hive": true,
+            "use-json-annotation": true,
+        });
+        expect(parts(output)).toEqual([generated]);
+    });
+
+    test.each([
+        ["use-json-annotation", [generated]],
+        ["use-freezed", [freezed, generated]],
+        ["use-hive", [generated]],
+    ])("classes with --%s", async (option, expected) => {
+        const output = await renderSchema(enumProperty, { [option]: true });
+        expect(parts(output)).toEqual(expected);
+    });
+});

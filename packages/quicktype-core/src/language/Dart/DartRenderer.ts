@@ -237,11 +237,19 @@ export class DartRenderer extends ConvenienceRenderer {
         }
 
         this.emitLine("import 'dart:convert';");
-        if (
-            this._options.useFreezed ||
-            this._options.useHive ||
-            this._options.useJsonAnnotation
-        ) {
+        // build_runner only writes the parts it generates code for: freezed
+        // the freezed classes, json_serializable (`.g.dart`) the coders of
+        // the classes, freezed's too, and hive_generator (`.g.dart` as well)
+        // the adapters of the classes and enums.  A part without its file
+        // doesn't compile.
+        const haveClasses =
+            this.typeGraph.allNamedTypesSeparated().objects.size > 0;
+        const freezedPart = this._options.useFreezed && haveClasses;
+        const generatedPart =
+            ((this._options.useFreezed || this._options.useJsonAnnotation) &&
+                haveClasses) ||
+            (this._options.useHive && (haveClasses || this.haveEnums));
+        if (freezedPart || generatedPart) {
             this.ensureBlankLine();
             const optionNameIsEmpty = this._options.partName.length === 0;
             // FIXME: This should use a `Name`, not `modifySource`
@@ -251,11 +259,11 @@ export class DartRenderer extends ConvenienceRenderer {
                     ? [...this.topLevels.keys()][0]
                     : this._options.partName,
             );
-            if (this._options.useFreezed) {
+            if (freezedPart) {
                 this.emitLine("part '", name, ".freezed.dart';");
             }
 
-            if (!this._options.justTypes) {
+            if (generatedPart && !this._options.justTypes) {
                 this.emitLine("part '", name, ".g.dart';");
             }
         }
