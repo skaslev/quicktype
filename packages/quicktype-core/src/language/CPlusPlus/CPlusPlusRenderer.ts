@@ -128,6 +128,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
     private readonly _variantIndexMethodName: string;
 
+    private _unionClasses: ReadonlySet<Type> | undefined;
+
     protected readonly typeNamingStyle: NamingStyle;
 
     protected readonly enumeratorNamingStyle: NamingStyle;
@@ -286,6 +288,49 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         return iterableSome(u.getChildren(), (child) =>
             this.typeReaches(child, u),
         );
+    }
+
+    // The classes of a union with several, which its `from_json` tries in
+    // turn, in that order.  The `from_json` of a class takes only values
+    // with all its required properties and no unknown ones, so two classes
+    // only take the same value if it is valid for both, as with an `anyOf`,
+    // or if it is invalid only in a way that isn't checked, such as an
+    // unknown key in a nested object.  The class that requires more of the
+    // value's properties is the more specific type then, so classes with
+    // more required properties are tried first, and others in the order of
+    // the variant.
+    private unionClassesInTryOrder(
+        members: ReadonlySet<Type>,
+    ): ClassType[] | undefined {
+        const classes = Array.from(members).filter(
+            (t): t is ClassType => t instanceof ClassType,
+        );
+        if (classes.length < 2) return undefined;
+
+        const requiredCount = (c: ClassType): number =>
+            Array.from(c.getProperties().values()).filter((p) => !p.isOptional)
+                .length;
+        return classes.sort((a, b) => requiredCount(b) - requiredCount(a));
+    }
+
+    // Whether `c` is one of several classes of a union.  A union only has
+    // several if they don't allow additional properties, so their
+    // `from_json` rejects unknown properties, and only takes values of its
+    // own class.
+    private isUnionClass(c: ClassType): boolean {
+        if (this._unionClasses === undefined) {
+            const unionClasses = new Set<Type>();
+            for (const t of this.typeGraph.allTypesUnordered()) {
+                if (!(t instanceof UnionType)) continue;
+                for (const m of this.unionClassesInTryOrder(t.members) ?? []) {
+                    unionClasses.add(m);
+                }
+            }
+
+            this._unionClasses = unionClasses;
+        }
+
+        return this._unionClasses.has(c);
     }
 
     private recursiveUnionUsesStackOptional(u: UnionType): boolean {
@@ -1707,6 +1752,35 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         }
     }
 
+    // Throws if the object `j` has a property that class `c` doesn't have.
+    private emitUnknownPropertiesCheck(c: ClassType): void {
+        const keys = Array.from(c.getProperties().keys()).map((json) =>
+            this.NarrowString.createStringLiteral([stringEscape(json)]),
+        );
+        if (keys.length === 0) {
+            this.emitLine(
+                'if (!j.empty()) throw std::runtime_error("Unexpected property " + j.begin().key());',
+            );
+            return;
+        }
+
+        this.emitBlock(
+            "for (auto it = j.begin(); it != j.end(); ++it)",
+            false,
+            () => {
+                this.emitLine(this.withConst("auto"), " & key = it.key();");
+                this.emitLine(
+                    "if (",
+                    arrayIntercalate<Sourcelike>(
+                        " && ",
+                        keys.map((key) => ["key != ", key]),
+                    ),
+                    ') throw std::runtime_error("Unexpected property " + key);',
+                );
+            },
+        );
+    }
+
     protected emitClassFunctions(c: ClassType, className: Name): void {
         const ourQualifier = this.ourQualifier(false);
         let cppType: Sourcelike;
@@ -1726,8 +1800,13 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 this.emitLine(
                     'if (!j.is_object()) throw std::runtime_error("Expected object");',
                 );
+                const isUnionClass = this.isUnionClass(c);
+                if (isUnionClass) {
+                    this.emitUnknownPropertiesCheck(c);
+                }
+
                 if (c.getProperties().size === 0) {
-                    this.emitLine("(void)j;");
+                    if (!isUnionClass) this.emitLine("(void)j;");
                     this.emitLine("(void)x;");
                 }
 
@@ -1748,6 +1827,18 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     }
 
                     if (propType.kind === "null" || propType.kind === "any") {
+                        // Other required properties are read with `at`,
+                        // which throws if they are missing.
+                        if (isUnionClass && !p.isOptional) {
+                            this.emitLine(
+                                "j.at(",
+                                this.NarrowString.createStringLiteral([
+                                    stringEscape(json),
+                                ]),
+                                ");",
+                            );
+                        }
+
                         this.emitLine(
                             assignment.wrap(
                                 [],
@@ -2459,6 +2550,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     }
                 }
 
+                const classes = this.unionClassesInTryOrder(nonNulls);
                 const cases: Array<[Type, Sourcelike]> = [];
                 for (const [kind, func] of functionForKind) {
                     if (kind === "array" && !tryTuples) {
@@ -2474,15 +2566,40 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 }
 
                 let onFirst = true;
-                for (const [typeForKind, condition] of cases) {
-                    this.emitLine(
+                for (const [typeForKind, test] of cases) {
+                    const condition = [
                         onFirst ? "if" : "else if",
                         " (",
-                        condition,
+                        test,
                         ")",
-                    );
-                    this.indent(() => emitAssignment(typeForKind));
+                    ];
                     onFirst = false;
+
+                    if (typeForKind.kind === "class" && classes !== undefined) {
+                        // Each class only takes values of its own.
+                        this.emitBlock(condition, false, () => {
+                            for (const c of classes) {
+                                this.emitLine("try {");
+                                this.indent(() => {
+                                    emitAssignment(c);
+                                    this.emitLine("return;");
+                                });
+                                this.emitLine(
+                                    "} catch (",
+                                    this.withConst("std::exception"),
+                                    " &) {}",
+                                );
+                            }
+
+                            this.emitLine(
+                                'throw std::runtime_error("Could not deserialise!");',
+                            );
+                        });
+                        continue;
+                    }
+
+                    this.emitLine(condition);
+                    this.indent(() => emitAssignment(typeForKind));
                 }
 
                 this.emitLine(
