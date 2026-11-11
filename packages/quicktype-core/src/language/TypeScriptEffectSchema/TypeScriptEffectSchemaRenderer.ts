@@ -22,15 +22,13 @@ import {
     stringEscape,
     utf16StringEscape,
 } from "../../support/Strings.js";
-import { panic } from "../../support/Support.js";
+import { defined, panic } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
-import {
-    ArrayType,
-    type ClassProperty,
+import type {
+    ClassProperty,
     EnumType,
-    MapType,
-    type ObjectType,
-    type Type,
+    ObjectType,
+    Type,
 } from "../../Type/index.js";
 import { matchType } from "../../Type/TypeUtils.js";
 import { legalizeName } from "../JavaScript/utils.js";
@@ -300,38 +298,29 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
         }
     }
 
-    protected walkObjectNames(objectType: ObjectType): Name[] {
-        const names: Name[] = [];
+    // The classes that `types` are or refer to, through arrays, maps and
+    // unions.
+    private referencedObjects(types: Iterable<Type>): ObjectType[] {
+        const objects: ObjectType[] = [];
         const visited = new Set<Type>();
-
         const recurse = (type: Type): void => {
             if (visited.has(type)) return;
             visited.add(type);
             if (type.kind === "object" || type.kind === "class") {
-                names.push(this.nameForNamedType(type));
-                this.forEachClassProperty(
-                    type as ObjectType,
-                    "none",
-                    (_, __, prop) => {
-                        recurse(prop.type);
-                    },
-                );
-            } else if (type instanceof ArrayType) {
-                recurse(type.items);
-            } else if (type instanceof MapType) {
-                recurse(type.values);
-            } else if (type instanceof EnumType) {
-                for (const t of type.getChildren()) {
-                    recurse(t);
-                }
+                objects.push(type as ObjectType);
+                return;
+            }
+
+            for (const child of type.getNonAttributeChildren()) {
+                recurse(child);
             }
         };
 
-        this.forEachClassProperty(objectType, "none", (_, __, prop) => {
-            recurse(prop.type);
-        });
+        for (const type of types) {
+            recurse(type);
+        }
 
-        return names;
+        return objects;
     }
 
     protected emitSchemas(): void {
@@ -344,48 +333,45 @@ export class TypeScriptEffectSchemaRenderer extends ConvenienceRenderer {
             },
         );
 
-        const order: number[] = [];
-        const mapKey: Name[] = [];
-        const mapValue: ObjectType[] = [];
+        // Each class comes after the classes it refers to, so only the
+        // references around a cycle are forward references, which need
+        // `S.suspend`.
+        const names = new Map<ObjectType, Name>();
         this.forEachObject("none", (type: ObjectType, name: Name) => {
-            mapKey.push(name);
-            mapValue.push(type);
+            names.set(type, name);
         });
-
-        mapKey.forEach((_, index) => {
-            // assume first
-            let ordinal = 0;
-
-            // pull out all names
-            const source = mapValue[index];
-            const names = this.walkObjectNames(source);
-
-            // must be behind all these names
-            names.forEach((name) => {
-                const depName = name;
-
-                // find this name's ordinal, if it has already been added
-                order.forEach((orderItem) => {
-                    const depIndex = orderItem;
-                    if (mapKey[depIndex] === depName) {
-                        // this is the index of the dependency, so make sure we come after it
-                        ordinal = Math.max(ordinal, depIndex + 1);
-                    }
-                });
+        const order: ObjectType[] = [];
+        const visited = new Set<ObjectType>();
+        const visit = (type: ObjectType): void => {
+            if (visited.has(type) || !names.has(type)) return;
+            visited.add(type);
+            const propertyTypes: Type[] = [];
+            this.forEachClassProperty(type, "none", (_, __, prop) => {
+                propertyTypes.push(prop.type);
             });
+            for (const referenced of this.referencedObjects(propertyTypes)) {
+                visit(referenced);
+            }
 
-            // insert index
-            order.splice(ordinal, 0, index);
-        });
+            order.push(type);
+        };
+        // Starting from the top-levels puts them after the classes they
+        // refer to even in a cycle.
+        for (const type of this.referencedObjects(this.topLevels.values())) {
+            visit(type);
+        }
 
-        // now emit ordered source
-        order.forEach((i) => {
+        for (const type of names.keys()) {
+            visit(type);
+        }
+
+        for (const type of order) {
             this.emitGatheredSource(
                 this.gatherSource(() => {
-                    this.emitObject(mapKey[i], mapValue[i]);
+                    this.emitObject(defined(names.get(type)), type);
                 }),
             );
-        });
+        }
 
         this.forEachTopLevel("none", (type, name) => {
             if (["class", "object", "enum"].includes(type.kind)) return;
