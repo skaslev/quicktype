@@ -281,15 +281,21 @@ export class DartRenderer extends ConvenienceRenderer {
         // build_runner only writes the parts it generates code for: freezed
         // the freezed classes, json_serializable (`.g.dart`) the coders of
         // the classes, freezed's too, and hive_generator (`.g.dart` as well)
-        // the adapters of the classes and enums.  A part without its file
-        // doesn't compile.
+        // the adapters of the classes, enums and tuples (but those with
+        // their own adapter).  A part without its file doesn't compile.
         const haveClasses =
             this.typeGraph.allNamedTypesSeparated().objects.size > 0;
+        const haveHiveTuples = Array.from(
+            this.typeGraph.allTypesUnordered(),
+        ).some(
+            (t) => t instanceof TupleType && !this.tupleHasOwnHiveAdapter(t),
+        );
         const freezedPart = this._options.useFreezed && haveClasses;
         const generatedPart =
             ((this._options.useFreezed || this._options.useJsonAnnotation) &&
                 haveClasses) ||
-            (this._options.useHive && (haveClasses || this.haveEnums));
+            (this._options.useHive &&
+                (haveClasses || this.haveEnums || haveHiveTuples));
         if (freezedPart || generatedPart) {
             this.ensureBlankLine();
             const optionNameIsEmpty = this._options.partName.length === 0;
@@ -1263,11 +1269,17 @@ export class DartRenderer extends ConvenienceRenderer {
      */
     protected emitTupleDefinition(t: TupleType, tupleName: Name): void {
         this.emitDescription(this.descriptionForType(t));
+        const ownHiveAdapter = this.tupleHasOwnHiveAdapter(t);
         if (this._options.useHive) {
             this.classCounter++;
-            this.emitLine(`@HiveType(typeId: ${this.classCounter})`);
+            if (!ownHiveAdapter) {
+                this.emitLine(`@HiveType(typeId: ${this.classCounter})`);
+            }
+
             this.classPropertyCounter = 0;
         }
+
+        const typeId = this.classCounter;
 
         if (this.tupleNeedsPresent(t)) {
             this._needPresent = true;
@@ -1276,7 +1288,7 @@ export class DartRenderer extends ConvenienceRenderer {
         const fields = this.tupleFields(t);
         this.emitBlock(["class ", tupleName], () => {
             for (const { name, type } of fields) {
-                if (this._options.useHive) {
+                if (this._options.useHive && !ownHiveAdapter) {
                     this.classPropertyCounter++;
                     this.emitLine(`@HiveField(${this.classPropertyCounter})`);
                 }
@@ -1354,6 +1366,62 @@ export class DartRenderer extends ConvenienceRenderer {
             this.ensureBlankLine();
             this.emitTupleToJson(t, tupleName);
         });
+
+        if (ownHiveAdapter) {
+            this.emitTupleHiveAdapter(tupleName, typeId);
+        }
+    }
+
+    /**
+     * Whether a tuple's Hive adapter is written here rather than by
+     * hive_generator.  hive_generator casts each field it reads back to the
+     * field's type with the nullability of its type arguments dropped,
+     * `Present<String?>?` to `Present<String>?`, which no `Present` of an
+     * item that can be null is.
+     */
+    private tupleHasOwnHiveAdapter(t: TupleType): boolean {
+        return (
+            this._options.useHive &&
+            !this._options.justTypes &&
+            this.tupleNeedsPresent(t)
+        );
+    }
+
+    /** A Hive adapter that stores the tuple as its JSON. */
+    private emitTupleHiveAdapter(tupleName: Name, typeId: number): void {
+        this.ensureBlankLine();
+        this.emitBlock(
+            [
+                "class ",
+                tupleName,
+                "Adapter extends TypeAdapter<",
+                tupleName,
+                ">",
+            ],
+            () => {
+                this.emitLine("@override");
+                this.emitLine(`final int typeId = ${typeId};`);
+                this.ensureBlankLine();
+                this.emitLine("@override");
+                this.emitLine(
+                    tupleName,
+                    " read(BinaryReader reader) => ",
+                    tupleName,
+                    ".",
+                    this.fromJson,
+                    "(json.decode(reader.readString()));",
+                );
+                this.ensureBlankLine();
+                this.emitLine("@override");
+                this.emitLine(
+                    "void write(BinaryWriter writer, ",
+                    tupleName,
+                    " obj) => writer.writeString(json.encode(obj.",
+                    this.toJson,
+                    "()));",
+                );
+            },
+        );
     }
 
     protected emitPresent(): void {

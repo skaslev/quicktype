@@ -140,3 +140,41 @@ describe("Dart part directives", () => {
         expect(parts(output)).toEqual(expected);
     });
 });
+
+describe("Dart part directives for tuples", () => {
+    const memberScores = {
+        type: "array",
+        items: {
+            title: "MemberScore",
+            type: "array",
+            items: [{ type: "string" }, { type: "number" }],
+        },
+    };
+    // An optional item that can be null: the tuple has its own adapter.
+    const presentOnly = {
+        type: "array",
+        minItems: 1,
+        items: [{ type: "string" }, { type: ["string", "null"] }],
+    };
+
+    test("a tuple is a Hive type", async () => {
+        const output = await renderSchema(memberScores, { "use-hive": true });
+        expect(parts(output)).toEqual([generated]);
+    });
+
+    test("a tuple with its own Hive adapter needs no part", async () => {
+        const output = await renderSchema(presentOnly, { "use-hive": true });
+        expect(output).toContain(
+            "class TopLevelAdapter extends TypeAdapter<TopLevel> {",
+        );
+        expect(parts(output)).toEqual([]);
+    });
+
+    test.each([
+        "use-json-annotation",
+        "use-freezed",
+    ])("tuples are plain classes with --%s", async (option) => {
+        const output = await renderSchema(memberScores, { [option]: true });
+        expect(parts(output)).toEqual([]);
+    });
+});

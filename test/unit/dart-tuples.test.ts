@@ -377,6 +377,49 @@ describe("tuple options", () => {
         );
     });
 
+    // hive_generator would read an item `Present<String?>?` back as a
+    // `Present<String>?`, which it never is: such tuples store their JSON.
+    test("--use-hive gives tuples with Present items their own adapter", async () => {
+        const output = await renderSchema(optionals, { "use-hive": true });
+        expect(output).toContain(
+            lines(
+                "class Opt {",
+                "    final String item0;",
+                "    final double? item1;",
+                "    final Present<String?>? item2;",
+            ),
+        );
+        expect(output).toContain(
+            lines(
+                "class OptAdapter extends TypeAdapter<Opt> {",
+                "    @override",
+                "    final int typeId = 2;",
+                "",
+                "    @override",
+                "    Opt read(BinaryReader reader) => Opt.fromJson(json.decode(reader.readString()));",
+                "",
+                "    @override",
+                "    void write(BinaryWriter writer, Opt obj) => writer.writeString(json.encode(obj.toJson()));",
+                "}",
+            ),
+        );
+        expect(output).not.toContain("@HiveType(typeId: 2)");
+        expect(output).toContain("@HiveType(typeId: 1)\nclass TopLevel {");
+    });
+
+    test("--use-hive adapters follow --from-map", async () => {
+        const output = await renderSchema(optionals, {
+            "use-hive": true,
+            "from-map": true,
+        });
+        expect(output).toContain(
+            "    Opt read(BinaryReader reader) => Opt.fromMap(json.decode(reader.readString()));",
+        );
+        expect(output).toContain(
+            "    void write(BinaryWriter writer, Opt obj) => writer.writeString(json.encode(obj.toMap()));",
+        );
+    });
+
     // Their generated code reads and writes JSON objects only, and calls the
     // tuple's coders.
     test.each([
