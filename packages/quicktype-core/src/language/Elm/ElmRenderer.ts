@@ -25,11 +25,11 @@ import {
 import { decapitalize } from "../../support/Strings.js";
 import { defined } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
-import type {
-    ClassProperty,
-    ClassType,
+import {
+    type ClassProperty,
+    type ClassType,
     EnumType,
-    Type,
+    type Type,
     UnionType,
 } from "../../Type/index.js";
 import { matchType, nullableFromUnion } from "../../Type/TypeUtils.js";
@@ -681,7 +681,7 @@ export class ElmRenderer extends ConvenienceRenderer {
     protected emitSourceStructure(): void {
         const exports: Sourcelike[] = [];
         const topLevelDecoders: Sourcelike[] = [];
-        this.forEachTopLevel("none", (_, name) => {
+        this.forEachTopLevel("none", (t, name) => {
             let { encoder, decoder } = defined(
                 this._topLevelDependents.get(name),
             );
@@ -690,7 +690,16 @@ export class ElmRenderer extends ConvenienceRenderer {
             }
 
             topLevelDecoders.push(decoder);
-            exports.push(name, encoder, decoder);
+            // A top-level enum or union is a custom type: expose its
+            // constructors, as for the other enums and unions.
+            const isCustomType =
+                t instanceof EnumType ||
+                (t instanceof UnionType && nullableFromUnion(t) === null);
+            exports.push(
+                isCustomType ? [name, "(..)"] : name,
+                encoder,
+                decoder,
+            );
         });
         this.forEachObject("none", (t: ClassType, name: Name) => {
             if (!mapContains(this.topLevels, t)) exports.push(name);
