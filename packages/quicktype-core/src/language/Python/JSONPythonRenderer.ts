@@ -52,6 +52,52 @@ export type ConverterFunction =
     | "from-stringified-bool"
     | "is-type";
 
+// Python's keywords (`keyword.kwlist`).
+const keywords = new Set([
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+]);
+
+// Can `s` be written as a keyword argument, `s=...`?  Non-ASCII names are
+// left out: Python NFKC-normalizes identifiers, so the keyword may not be
+// `s`.
+function isKeywordArgument(s: string): boolean {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(s) && !keywords.has(s);
+}
+
 interface TopLevelConverterNames {
     fromDict: Name;
     toDict: Name;
@@ -198,6 +244,12 @@ export class JSONPythonRenderer extends PythonRenderer {
     protected forbiddenForObjectProperties(c: ClassType, className: Name) {
         const result = super.forbiddenForObjectProperties(c, className);
         result.names = result.names.concat(["from_dict", "to_dict"]);
+        // from_dict casts the aliases of pydantic models, and its locals are
+        // the properties.
+        if (this.pyOptions.pydanticBaseModel) {
+            result.names = result.names.concat(["cast"]);
+        }
+
         return result;
     }
 
@@ -1114,6 +1166,7 @@ export class JSONPythonRenderer extends PythonRenderer {
             ],
             () => {
                 const args: Sourcelike[] = [];
+                const aliasArgs: Sourcelike[] = [];
                 this.emitLine("assert isinstance(obj, dict)");
                 this.forEachClassProperty(t, "none", (name, jsonName, cp) => {
                     const property = {
@@ -1127,12 +1180,19 @@ export class JSONPythonRenderer extends PythonRenderer {
                         makeValue(this.deserializer(property, cp.type)),
                     );
                     // A pydantic model takes its fields as keyword
-                    // arguments only.
-                    args.push(
-                        this.pyOptions.pydanticBaseModel
-                            ? [name, "=", name]
-                            : name,
-                    );
+                    // arguments only, under their aliases.  An alias that
+                    // can't be a keyword argument goes in a `**` dict,
+                    // which mypy only takes as `Dict[str, Any]`.
+                    const alias = this.pydanticAlias(name, jsonName);
+                    if (!this.pyOptions.pydanticBaseModel) {
+                        args.push(name);
+                    } else if (alias === undefined) {
+                        args.push([name, "=", name]);
+                    } else if (isKeywordArgument(alias)) {
+                        args.push([alias, "=", name]);
+                    } else {
+                        aliasArgs.push([this.string(alias), ": ", name]);
+                    }
                     {
                         const [min, max] = minMaxItemsForType(cp.type) ?? [];
                         const check = (condition: Sourcelike): void =>
@@ -1172,6 +1232,19 @@ export class JSONPythonRenderer extends PythonRenderer {
                             ]);
                     }
                 });
+                if (aliasArgs.length > 0) {
+                    const dict = this.pyOptions.features.builtinGenerics
+                        ? "dict"
+                        : this.withTyping("Dict");
+                    args.push([
+                        "**",
+                        this.cast(
+                            [dict, "[str, ", this.withTyping("Any"), "]"],
+                            ["{", arrayIntercalate(", ", aliasArgs), "}"],
+                        ),
+                    ]);
+                }
+
                 this.emitLine(
                     "return ",
                     className,

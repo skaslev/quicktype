@@ -49,7 +49,12 @@ export class PythonRenderer extends ConvenienceRenderer {
         super(targetLanguage, renderContext);
     }
 
+    // The names imported from pydantic.
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
+        if (this.pyOptions.pydanticBaseModel) {
+            return [...forbiddenTypeNames, "BaseModel", "Field"];
+        }
+
         return forbiddenTypeNames;
     }
 
@@ -57,10 +62,11 @@ export class PythonRenderer extends ConvenienceRenderer {
         _: ClassType,
         _classNamed: Name,
     ): ForbiddenWordsInfo {
-        return {
-            names: forbiddenPropertyNames as unknown as string[],
-            includeGlobalForbidden: false,
-        };
+        const names: string[] = [...forbiddenPropertyNames];
+        // A field with a default binds its name in the class body, where
+        // the fields after it may call `Field`.
+        if (this.pyOptions.pydanticBaseModel) names.push("Field");
+        return { names, includeGlobalForbidden: false };
     }
 
     protected makeNamedTypeNamer(): Namer {
@@ -449,6 +455,50 @@ export class PythonRenderer extends ConvenienceRenderer {
         return super.sortClassProperties(properties, propertyNames);
     }
 
+    // The JSON name of a pydantic model's field, if it isn't the field's
+    // name.  pydantic validates the field under its alias (and serializes
+    // it with `by_alias`), and type checkers take the alias as the name of
+    // the constructor's parameter, since pydantic models are dataclass
+    // transforms.
+    protected pydanticAlias(name: Name, jsonName: string): string | undefined {
+        if (
+            !this.pyOptions.pydanticBaseModel ||
+            this.sourcelikeToString(name) === jsonName
+        ) {
+            return undefined;
+        }
+
+        return jsonName;
+    }
+
+    // A class property's type and default, with its alias if it has one:
+    // `first_entry: int = Field(alias="first-entry")`.  pydantic 1 and 2
+    // both take `Field(default=..., alias=...)`.
+    private classPropertyType(
+        name: Name,
+        jsonName: string,
+        cp: ClassProperty,
+    ): Sourcelike {
+        const alias = this.pydanticAlias(name, jsonName);
+        if (alias === undefined) {
+            return this.pythonType(cp.type, true);
+        }
+
+        const hasDefault =
+            this.classPropertyHasNoneDefault(cp) &&
+            this.noneDefault(true).length > 0;
+        return [
+            this.pythonType(cp.type),
+            " = ",
+            this.withImport("pydantic", "Field"),
+            "(",
+            hasDefault ? "default=None, " : "",
+            "alias=",
+            this.string(alias),
+            ")",
+        ];
+    }
+
     protected emitClass(t: ClassType): void {
         if (
             this.pyOptions.features.dataClasses &&
@@ -470,7 +520,7 @@ export class PythonRenderer extends ConvenienceRenderer {
                                 name,
                                 this.typeHint(
                                     ": ",
-                                    this.pythonType(cp.type, true),
+                                    this.classPropertyType(name, jsonName, cp),
                                 ),
                             );
                             this.emitDescription(
