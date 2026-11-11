@@ -3597,8 +3597,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitNamespaces(this._namespaceNames, () => {
             this.emitDescription(this.descriptionForType(d));
             this.ensureBlankLine();
-            this.emitLine("using nlohmann::json;");
-            this.ensureBlankLine();
+            // Just-types output doesn't include nlohmann/json.hpp, and the
+            // types spell out `nlohmann::json`.
+            if (!this._options.justTypes) {
+                this.emitLine("using nlohmann::json;");
+                this.ensureBlankLine();
+            }
             if (d instanceof ClassType) {
                 this.emitClass(d, defName);
             } else if (d instanceof EnumType) {
