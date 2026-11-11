@@ -1,5 +1,6 @@
 // nlohmann/json converts std::tuple to and from JSON arrays, so C++ keeps
-// fixed-length tuples.  Other tuple shapes stay arrays of a union.
+// fixed-length tuples.  Other tuple shapes are structs with their own
+// conversions, see cplusplus-tuple-rest.test.ts.
 
 import {
     InputData,
@@ -77,13 +78,13 @@ test.each([
         "using TopLevel = std::tuple<std::string, double>;",
     ],
     [
-        "rest elements become an array",
+        "rest elements become a struct",
         {
             type: "array",
             prefixItems: [{ type: "string" }],
             items: { type: "integer" },
         },
-        "using TopLevel = std::vector<TopLevelElement>;",
+        "std::vector<int64_t> rest;",
     ],
 ] as const)("%s", async (_, schema, expected) => {
     expect(await renderSchema(schema, justTypes)).toContain(expected);

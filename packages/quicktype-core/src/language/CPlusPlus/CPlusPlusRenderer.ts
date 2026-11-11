@@ -25,7 +25,9 @@ import {
     DependencyName,
     type Name,
     type NameStyle,
+    Namespace,
     type Namer,
+    SimpleName,
     funPrefixNamer,
 } from "../../Naming.js";
 import type { BlankLineConfig, RenderContext } from "../../Renderer.js";
@@ -84,6 +86,22 @@ import {
     optionalFactoryAsSharedType,
 } from "./utils.js";
 
+function elements(n: number): string {
+    return n === 1 ? "1 element" : `${n} elements`;
+}
+
+// What a tuple with optional items or a rest expects, for error messages.
+function expectedTupleLength(min: number, max: number | undefined): string {
+    if (max === undefined) {
+        return min === 0 ? "an array" : `an array of at least ${elements(min)}`;
+    }
+
+    if (min === max) return `an array of ${elements(min)}`;
+    return min === 0
+        ? `an array of at most ${elements(max)}`
+        : `an array of ${min} to ${max} elements`;
+}
+
 export class CPlusPlusRenderer extends ConvenienceRenderer {
     /**
      * For forward declaration practically
@@ -99,6 +117,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     private readonly _gettersAndSettersForPropertyName = new Map<
         Name,
         [Name, Name, Name]
+    >();
+
+    /// The members of the structs of tuples with optional items or a rest
+    private readonly _tupleMemberNames = new Map<
+        TupleType,
+        { items: Name[]; rest: Name | undefined }
     >();
 
     private readonly _namespaceNames: readonly string[];
@@ -348,29 +372,69 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         );
     }
 
-    // Tuples are spelled out as std::tuple<A, B>, unless the schema names
-    // them or they contain themselves.  Named tuples are type aliases, or
-    // structs deriving from std::tuple if they contain themselves: an alias
-    // can't refer to itself.
+    // Fixed-length tuples are spelled out as std::tuple<A, B>, unless the
+    // schema names them or they contain themselves.  Named tuples are type
+    // aliases, or structs deriving from std::tuple if they contain
+    // themselves: an alias can't refer to itself.  A std::tuple can't leave
+    // out items, so tuples with optional items or a rest are always structs
+    // with a member per item.
     protected tupleNeedsName(t: TupleType): boolean {
+        const isNamedAnyway = (u: TupleType): boolean =>
+            !u.isFixedLength || this.hasGivenName(u);
         return (
-            this.hasGivenName(t) ||
+            isNamedAnyway(t) ||
             this.isInCycleThrough(
                 t,
                 (c) =>
                     !["class", "enum"].includes(c.kind) &&
                     !(c instanceof UnionType && this.unionNeedsName(c)) &&
-                    !(c instanceof TupleType && this.hasGivenName(c)),
+                    !(c instanceof TupleType && isNamedAnyway(c)),
             )
         );
     }
 
+    // A tuple declared as a struct: a struct deriving from std::tuple, or
+    // one with a member per item.  Either has its own from_json and to_json.
     private isTupleStruct(t: Type): t is TupleType {
         return (
             t instanceof TupleType &&
             this.tupleNeedsName(t) &&
-            this.isRecursiveTuple(t)
+            (!t.isFixedLength || this.isRecursiveTuple(t))
         );
+    }
+
+    private tupleMemberNames(t: TupleType): {
+        items: Name[];
+        rest: Name | undefined;
+    } {
+        return defined(this._tupleMemberNames.get(t));
+    }
+
+    // The members of a tuple's struct are `item0`, `item1`, ... and `rest`,
+    // in the member naming style.  They mustn't be named like a type: GCC
+    // rejects a member that changes what a name used in the class means.
+    protected setUpNaming(): ReadonlySet<Namespace> {
+        const namespaces = super.setUpNaming();
+        const tupleNamespaces: Namespace[] = [];
+        for (const t of this.typeGraph.allTypesUnordered()) {
+            if (!(t instanceof TupleType) || t.isFixedLength) continue;
+
+            const ns = new Namespace(
+                t.getCombinedName(),
+                undefined,
+                namespaces,
+                [],
+            );
+            const member = (name: string): Name =>
+                ns.add(new SimpleName([name], this._memberNamingFunction, 0));
+            this._tupleMemberNames.set(t, {
+                items: t.items.map((_, i) => member(`item${i}`)),
+                rest: t.rest === undefined ? undefined : member("rest"),
+            });
+            tupleNamespaces.push(ns);
+        }
+
+        return setUnion(namespaces, tupleNamespaces);
     }
 
     private forEachTupleStruct(
@@ -386,10 +450,33 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.forEachSpecificNamedType(blankLocations, tuples, f);
     }
 
-    private get haveTuples(): boolean {
+    // Whether a std::tuple is used: the other tuples are structs.
+    private get haveStdTuples(): boolean {
         return iterableSome(
             this.typeGraph.allTypesUnordered(),
-            (t) => t instanceof TupleType,
+            (t) => t instanceof TupleType && t.isFixedLength,
+        );
+    }
+
+    private haveTuplesWith(f: (t: TupleType) => boolean): boolean {
+        return iterableSome(
+            this.typeGraph.allTypesUnordered(),
+            (t) => t instanceof TupleType && f(t),
+        );
+    }
+
+    // Tuple structs convert their nullable items and rest elements, which
+    // are optionals, with wide strings.
+    private get haveTupleStructsWithNullables(): boolean {
+        return this.haveTuplesWith(
+            (t) =>
+                !t.isFixedLength &&
+                iterableSome(
+                    t.getNonAttributeChildren(),
+                    (c) =>
+                        c instanceof UnionType &&
+                        removeNullFromUnion(c)[0] !== null,
+                ),
         );
     }
 
@@ -725,7 +812,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 )) ||
             (!this._options.codeFormat &&
                 !this._options.justTypes &&
-                this.haveOptionals)
+                this.haveOptionals) ||
+            this.haveTuplesWith((t) => t.minItems < t.items.length)
         ) {
             if (this._options.boost) {
                 this.emitInclude(true, "boost/optional.hpp");
@@ -742,7 +830,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             }
         }
 
-        if (this.haveTuples) {
+        if (this.haveStdTuples) {
             this.emitInclude(true, "tuple");
         }
 
@@ -833,7 +921,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             headers.push("string");
         }
 
-        if (kinds.has("array")) headers.push("vector");
+        // Arrays and the rests of tuples are std::vectors.
+        if (
+            kinds.has("array") ||
+            this.haveTuplesWith((t) => t.rest !== undefined)
+        ) {
+            headers.push("vector");
+        }
+
         return { headers, json, optional };
     }
 
@@ -1116,7 +1211,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             },
             (tupleType) => {
                 // With wide strings, the JSON side of a conversion is the
-                // tuple with narrow strings, which has no name.
+                // tuple with narrow strings, which has no name, unless it's
+                // a struct, which converts its items itself.
                 if (
                     !this.tupleNeedsName(tupleType) ||
                     (forceNarrowString &&
@@ -1171,6 +1267,134 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         return ["std::tuple<", arrayIntercalate(", ", items), ">"];
     }
 
+    // The member for a required item is what a class member for a required
+    // property would be.
+    private tupleRequiredItemType(
+        item: Type,
+        withIssues: boolean,
+        forceNarrowString: boolean,
+    ): Sourcelike {
+        return this.cppType(
+            item,
+            {
+                needsForwardIndirection: true,
+                needsOptionalIndirection: true,
+                inJsonNamespace: false,
+            },
+            withIssues,
+            forceNarrowString,
+            false,
+        );
+    }
+
+    // The member for an optional item is an optional (or std::shared_ptr,
+    // where the type can't be held by value), empty if the item is missing.
+    // Returns the optional and the type it holds.  An item of a nullable
+    // type is an optional of the nullable type, which keeps a missing item
+    // apart from a null one.
+    private tupleOptionalItemType(
+        item: Type,
+        withIssues: boolean,
+        forceNarrowString: boolean,
+    ): [string, Sourcelike] {
+        if (item.isNullable) {
+            return [
+                this.optionalTypeStack(),
+                this.tupleRequiredItemType(item, withIssues, forceNarrowString),
+            ];
+        }
+
+        return [
+            this.optionalType(item),
+            this.cppType(
+                item,
+                {
+                    needsForwardIndirection: false,
+                    needsOptionalIndirection: true,
+                    inJsonNamespace: false,
+                },
+                withIssues,
+                forceNarrowString,
+                false,
+            ),
+        ];
+    }
+
+    private tupleItemType(
+        t: TupleType,
+        i: number,
+        withIssues: boolean,
+        forceNarrowString: boolean,
+    ): Sourcelike {
+        const item = t.items[i];
+        if (i < t.minItems) {
+            return this.tupleRequiredItemType(
+                item,
+                withIssues,
+                forceNarrowString,
+            );
+        }
+
+        const [optional, inner] = this.tupleOptionalItemType(
+            item,
+            withIssues,
+            forceNarrowString,
+        );
+        return [optional, "<", inner, ">"];
+    }
+
+    // The elements of the rest, like those of an array.
+    private tupleRestElementType(
+        rest: Type,
+        withIssues: boolean,
+        forceNarrowString: boolean,
+    ): Sourcelike {
+        return this.cppType(
+            rest,
+            {
+                needsForwardIndirection: false,
+                needsOptionalIndirection: true,
+                inJsonNamespace: false,
+            },
+            withIssues,
+            forceNarrowString,
+            false,
+        );
+    }
+
+    // How many elements a JSON array for a tuple with optional items or a
+    // rest may have: the tuple's shape, narrowed by the schema's `minItems`
+    // and `maxItems`, which also limit a rest.  No maximum for an unlimited
+    // rest.
+    private tupleLengthBounds(t: TupleType): [number, number | undefined] {
+        const [minItems, maxItems] = minMaxItemsForType(t) ?? [];
+        const min = Math.max(t.minItems, minItems ?? 0);
+        let max = t.rest === undefined ? t.items.length : undefined;
+        if (maxItems !== undefined) {
+            max = max === undefined ? maxItems : Math.min(max, maxItems);
+        }
+
+        return [min, max];
+    }
+
+    // Whether `j` has the length of the tuple.
+    private tupleLengthCondition(t: TupleType): Sourcelike {
+        if (t.isFixedLength) {
+            return ["j.is_array() && j.size() == ", t.items.length.toString()];
+        }
+
+        const [min, max] = this.tupleLengthBounds(t);
+        const conditions = ["j.is_array()"];
+        if (min === max) {
+            conditions.push(`j.size() == ${min}`);
+        } else {
+            if (min > 0) conditions.push(`j.size() >= ${min}`);
+            if (max !== undefined) conditions.push(`j.size() <= ${max}`);
+        }
+
+        return conditions.join(" && ");
+    }
+
     /**
      * similar to cppType, it practically gathers all the generated types within
      * 't'. It also records, whether a given sub-type is part of a variant or not.
@@ -1205,12 +1429,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 recur(true, isVariant, l + 1, t.values);
             } else if (t instanceof TupleType) {
                 if (this.tupleNeedsName(t)) {
+                    // The struct of a tuple with optional items or a rest
+                    // can be forward declared, like a class.
                     result.push({
                         name: this.nameForNamedType(t),
                         type: t,
                         level: l,
                         variant: isVariant,
-                        forceInclude: true,
+                        forceInclude: t.isFixedLength || forceInclude,
                     });
                 } else {
                     // The elements of a std::tuple must be complete types.
@@ -2319,6 +2545,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
     protected emitTupleTypedef(t: TupleType, tupleName: Name): void {
         this.emitDescription(this.descriptionForType(t));
+        if (!t.isFixedLength) {
+            this.emitTupleMembersStruct(t, tupleName);
+            return;
+        }
+
         const tupleType = this.cppTupleType(t, false, true, false);
         if (!this.isRecursiveTuple(t)) {
             this.emitLine("using ", tupleName, " = ", tupleType, ";");
@@ -2350,6 +2581,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
     }
 
     protected emitTupleStructFunctions(t: TupleType, tupleName: Name): void {
+        if (!t.isFixedLength) {
+            this.emitTupleMembersFunctions(t, tupleName);
+            return;
+        }
+
         const base: Sourcelike = [tupleName, "::base"];
         // With wide strings, the JSON side is the tuple with narrow strings.
         const narrow = this.cppTupleType(t, false, false, true);
@@ -2396,6 +2632,292 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     ]),
                     ";",
                 ),
+        );
+    }
+
+    // A std::tuple has an element per item, so a tuple with optional items
+    // or a rest is a struct with a member per item and a std::vector for the
+    // rest:
+    //
+    //     struct SlotRange {
+    //         int64_t item0;
+    //         int64_t item1;
+    //         SlotNode item2;
+    //         std::vector<SlotNode> rest;
+    //     };
+    //
+    // It's a plain struct in both code formats, as the std::tuple it stands
+    // in for is: fixed-length tuples have no getters and setters either,
+    // and those of classes check constraints that tuples don't.
+    protected emitTupleMembersStruct(t: TupleType, tupleName: Name): void {
+        const names = this.tupleMemberNames(t);
+        this.emitBlock(["struct ", tupleName], true, () => {
+            t.items.forEach((_, i) => {
+                this.emitMember(
+                    this.tupleItemType(t, i, true, false),
+                    names.items[i],
+                );
+            });
+            if (t.rest !== undefined) {
+                this.emitMember(
+                    [
+                        "std::vector<",
+                        this.tupleRestElementType(t.rest, true, false),
+                        ">",
+                    ],
+                    defined(names.rest),
+                );
+            }
+        });
+    }
+
+    // An item may only follow an optional one that is present: JSON can't
+    // leave a gap.
+    private tupleGapCondition(t: TupleType): Sourcelike | undefined {
+        const names = this.tupleMemberNames(t);
+        const conditions: Sourcelike[] = [];
+        for (let i = t.minItems + 1; i < t.items.length; i++) {
+            conditions.push([
+                "!x.",
+                names.items[i - 1],
+                " && x.",
+                names.items[i],
+            ]);
+        }
+
+        if (t.rest !== undefined && t.minItems < t.items.length) {
+            conditions.push([
+                "!x.",
+                names.items[t.items.length - 1],
+                " && !x.",
+                defined(names.rest),
+                ".empty()",
+            ]);
+        }
+
+        if (conditions.length <= 1) return conditions[0];
+        return arrayIntercalate<Sourcelike>(
+            " || ",
+            conditions.map((c) => ["(", c, ")"]),
+        );
+    }
+
+    // from_json checks the length of the array, then reads the required
+    // items, the optional ones that are there, and the rest.  to_json
+    // writes them in the same order.  An item after a missing optional one
+    // can't be written: moving it into the gap, or writing null there,
+    // would make a different value, so that's an error.
+    protected emitTupleMembersFunctions(t: TupleType, tupleName: Name): void {
+        const names = this.tupleMemberNames(t);
+        const [min, max] = this.tupleLengthBounds(t);
+        const wrap = (
+            from: Sourcelike,
+            to: Sourcelike,
+            inner: Sourcelike,
+        ): Sourcelike =>
+            this._stringType.wrapEncodingChange([], from, to, inner);
+        const get = (index: string, narrow: Sourcelike, wide: Sourcelike) =>
+            wrap(narrow, wide, ["j.at(", index, ").get<", narrow, ">()"]);
+        // nlohmann/json would convert a floating point number to an
+        // integer, so integers are checked, as for class members.
+        const checkInteger = (
+            item: Type,
+            index: string,
+            guard: string[] = [],
+        ): void => {
+            if (item.kind !== "integer") return;
+            this.emitLine(
+                "if (",
+                [...guard, `!j.at(${index}).is_number_integer()`].join(" && "),
+                ') throw std::runtime_error("',
+                tupleName,
+                ': expected an integer");',
+            );
+        };
+
+        this.emitBlock(
+            [
+                "inline void from_json(",
+                this.withConst("json"),
+                " & j, ",
+                tupleName,
+                " & x)",
+            ],
+            false,
+            () => {
+                const tooShortOrLong = ["!j.is_array()"];
+                if (min > 0) tooShortOrLong.push(`j.size() < ${min}`);
+                if (max !== undefined) tooShortOrLong.push(`j.size() > ${max}`);
+                this.emitLine(
+                    "if (",
+                    tooShortOrLong.join(" || "),
+                    ') throw std::runtime_error("',
+                    tupleName,
+                    ": expected ",
+                    expectedTupleLength(min, max),
+                    '");',
+                );
+                t.items.forEach((item, i) => {
+                    const index = i.toString();
+                    if (i < t.minItems) {
+                        checkInteger(item, index);
+                        this.emitLine(
+                            "x.",
+                            names.items[i],
+                            " = ",
+                            get(
+                                index,
+                                this.tupleRequiredItemType(item, false, true),
+                                this.tupleRequiredItemType(item, false, false),
+                            ),
+                            ";",
+                        );
+                        return;
+                    }
+
+                    const [optional, narrow] = this.tupleOptionalItemType(
+                        item,
+                        false,
+                        true,
+                    );
+                    const [, wide] = this.tupleOptionalItemType(
+                        item,
+                        false,
+                        false,
+                    );
+                    const factory =
+                        optional === this.optionalTypeHeap()
+                            ? this.optionalFactoryHeap()
+                            : this.optionalFactoryStack();
+                    checkInteger(item, index, [`j.size() > ${index}`]);
+                    this.emitLine(
+                        "x.",
+                        names.items[i],
+                        " = j.size() > ",
+                        index,
+                        " ? ",
+                        factory,
+                        "<",
+                        wide,
+                        ">(",
+                        get(index, narrow, wide),
+                        ") : ",
+                        optional,
+                        "<",
+                        wide,
+                        ">();",
+                    );
+                });
+
+                const restType = t.rest;
+                if (restType !== undefined) {
+                    const rest = defined(names.rest);
+                    const loop = [
+                        "for (std::size_t i = ",
+                        t.items.length.toString(),
+                        "; i < j.size(); i++)",
+                    ];
+                    const pushBack = [
+                        "x.",
+                        rest,
+                        ".push_back(",
+                        get(
+                            "i",
+                            this.tupleRestElementType(restType, false, true),
+                            this.tupleRestElementType(restType, false, false),
+                        ),
+                        ");",
+                    ];
+                    this.emitLine("x.", rest, ".clear();");
+                    if (restType.kind === "integer") {
+                        this.emitBlock(loop, false, () => {
+                            checkInteger(restType, "i");
+                            this.emitLine(pushBack);
+                        });
+                    } else {
+                        this.emitLine(loop, " ", pushBack);
+                    }
+                }
+            },
+        );
+        this.ensureBlankLine();
+
+        this.emitBlock(
+            [
+                "inline void to_json(json & j, ",
+                this.withConst(tupleName),
+                " & x)",
+            ],
+            false,
+            () => {
+                const gap = this.tupleGapCondition(t);
+                if (gap !== undefined) {
+                    this.emitLine(
+                        "if (",
+                        gap,
+                        ') throw std::runtime_error("',
+                        tupleName,
+                        ': an item follows a missing optional item");',
+                    );
+                }
+
+                this.emitLine("j = json::array();");
+                t.items.forEach((item, i) => {
+                    if (i < t.minItems) {
+                        this.emitLine(
+                            "j.push_back(",
+                            wrap(
+                                this.tupleRequiredItemType(item, false, false),
+                                this.tupleRequiredItemType(item, false, true),
+                                ["x.", names.items[i]],
+                            ),
+                            ");",
+                        );
+                        return;
+                    }
+
+                    const [, wide] = this.tupleOptionalItemType(
+                        item,
+                        false,
+                        false,
+                    );
+                    const [, narrow] = this.tupleOptionalItemType(
+                        item,
+                        false,
+                        true,
+                    );
+                    this.emitLine(
+                        "if (x.",
+                        names.items[i],
+                        ") j.push_back(",
+                        wrap(wide, narrow, ["*x.", names.items[i]]),
+                        ");",
+                    );
+                });
+
+                if (t.rest !== undefined) {
+                    // Not `auto`, which would be a proxy for the elements
+                    // of a std::vector<bool>.
+                    const wide = this.tupleRestElementType(
+                        t.rest,
+                        false,
+                        false,
+                    );
+                    this.emitLine(
+                        "for (",
+                        this.withConst(wide),
+                        " & item : x.",
+                        defined(names.rest),
+                        ") j.push_back(",
+                        wrap(
+                            wide,
+                            this.tupleRestElementType(t.rest, false, true),
+                            "item",
+                        ),
+                        ");",
+                    );
+                }
+            },
         );
     }
 
@@ -2515,24 +3037,36 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     );
                 };
 
-                // Tuples are arrays, too.  The tuples of a union differ in
-                // length, but an array of a tuple's length may be the
-                // union's array instead, so then the tuples are tried first.
-                const tupleCases: Array<[Type, Sourcelike]> = [];
-                for (const t of nonNulls) {
-                    if (!(t instanceof TupleType)) continue;
-                    tupleCases.push([
-                        t,
-                        [
-                            "j.is_array() && j.size() == ",
-                            t.items.length.toString(),
-                        ],
-                    ]);
-                }
-
+                // Tuples are arrays, too.  The tuples of a union have
+                // different shapes, so where the lengths they allow don't
+                // overlap, the length tells them apart.  But an array of a
+                // tuple's length may be the union's array instead, or
+                // another tuple of that length, so then the tuples are tried
+                // in turn first.
+                const tuples = Array.from(nonNulls).filter(
+                    (t): t is TupleType => t instanceof TupleType,
+                );
+                const tupleCases: Array<[Type, Sourcelike]> = tuples.map(
+                    (t) => [t, this.tupleLengthCondition(t)],
+                );
+                const bounds = tuples.map((t): [number, number] => {
+                    if (t.isFixedLength)
+                        return [t.items.length, t.items.length];
+                    const [min, max] = this.tupleLengthBounds(t);
+                    return [min, max ?? Number.POSITIVE_INFINITY];
+                });
+                const tuplesOverlap = bounds.some(([min, max], i) =>
+                    bounds
+                        .slice(i + 1)
+                        .some(
+                            ([otherMin, otherMax]) =>
+                                min <= otherMax && otherMin <= max,
+                        ),
+                );
                 const tryTuples =
                     tupleCases.length > 0 &&
-                    iterableSome(nonNulls, (t) => t instanceof ArrayType);
+                    (tuplesOverlap ||
+                        iterableSome(nonNulls, (t) => t instanceof ArrayType));
                 if (tryTuples) {
                     for (const [t, condition] of tupleCases) {
                         this.emitBlock(["if (", condition, ")"], false, () => {
@@ -3766,7 +4300,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             this.emitOptionalHelpers();
         }
 
-        if (this.haveTuples) {
+        if (this.haveStdTuples) {
             this.ensureBlankLine();
             this.emitTupleHelpers();
         }
@@ -3931,7 +4465,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             this.ensureBlankLine();
         }
 
-        if (!this._options.justTypes && this.haveTuples) {
+        if (!this._options.justTypes && this.haveStdTuples) {
             this.emitTupleHelpers();
             this.ensureBlankLine();
         }
@@ -4002,8 +4536,16 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     propRecord.kind = IncludeKind.ForwardDeclare;
                 }
             } else if (t.type instanceof TupleType) {
+                // A forward declaration is enough where a tuple's struct is
+                // forward declared, and so held in a std::shared_ptr, which
+                // breaks the include cycles of recursive types.
                 propRecord.typeKind = "tuple";
-                propRecord.kind = IncludeKind.Include;
+                propRecord.kind =
+                    t.level === 0 ||
+                    t.forceInclude ||
+                    !this.isForwardDeclaredType(t.type)
+                        ? IncludeKind.Include
+                        : IncludeKind.ForwardDeclare;
             }
 
             if (includes.has(typeName)) {
@@ -4050,7 +4592,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 }
             }
         } else if (c instanceof TupleType) {
-            for (const item of c.items) {
+            for (const item of c.getNonAttributeChildren()) {
                 this.updateIncludes(true, includes, item, c);
             }
         } else if (c instanceof ClassType) {
@@ -4105,6 +4647,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                             } else {
                                 this.emitLine("struct ", name, ";");
                             }
+                        } else if (rec.typeKind === "tuple") {
+                            this.emitLine("struct ", name, ";");
                         } else if (rec.typeKind === "enum") {
                             this.emitLine(
                                 "enum class ",
@@ -4389,7 +4933,8 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 // are optionals.
                 if (
                     this.superThis.haveOptionalProperties ||
-                    this.superThis.haveUnions
+                    this.superThis.haveUnions ||
+                    this.superThis.haveTupleStructsWithNullables
                 ) {
                     this.superThis.emitLine(
                         "template<typename TF, typename TT>",
@@ -4466,7 +5011,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 );
                 this.superThis.ensureBlankLine();
 
-                if (this.superThis.haveTuples) {
+                if (this.superThis.haveStdTuples) {
                     this.superThis.emitLine(
                         "template<typename... TF, typename... TT>",
                     );

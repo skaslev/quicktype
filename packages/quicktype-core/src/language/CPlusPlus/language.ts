@@ -145,9 +145,10 @@ export class CPlusPlusTargetLanguage extends TargetLanguage<
     }
 
     // nlohmann/json converts std::tuple to and from JSON arrays, one element
-    // per item.
+    // per item.  Tuples with optional items or a rest are structs with their
+    // own conversions.
     public get tupleSupport(): TupleSupport {
-        return "fixed";
+        return "full";
     }
 
     public get stringTypeMapping(): StringTypeMapping {
