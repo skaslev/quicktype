@@ -133,6 +133,17 @@ export abstract class TargetLanguage<
         return false;
     }
 
+    /**
+     * `supportsUnionsWithMultipleArrays` for the given renderer options, the
+     * same untyped option values that `makeRenderer` receives.  Languages
+     * where it depends on an option override this.
+     */
+    public getSupportsUnionsWithMultipleArrays(
+        _rendererOptions: Record<string, unknown> = {},
+    ): boolean {
+        return this.supportsUnionsWithMultipleArrays;
+    }
+
     public get supportsFullObjectType(): boolean {
         return false;
     }

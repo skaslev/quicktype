@@ -253,7 +253,9 @@ class Run implements RunContext {
         typeBuilder.makesDistinctObjects =
             targetLanguage.supportsUnionsWithMultipleClasses;
         typeBuilder.makesDistinctArrays =
-            targetLanguage.supportsUnionsWithMultipleArrays;
+            targetLanguage.getSupportsUnionsWithMultipleArrays(
+                this._options.rendererOptions,
+            );
 
         return {
             targetLanguage,
