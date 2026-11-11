@@ -1085,10 +1085,16 @@ async function addTypesInSchema(
                         ),
                     );
                 }
-                itemType = typeBuilder.getUnionType(
-                    emptyTypeAttributes,
-                    new Set(itemTypes),
-                );
+                // An empty tuple (`items: []`, or `prefixItems: []` without
+                // `items`) has no item types to make a union of: it doesn't
+                // constrain its elements, as if there were no `items`.
+                itemType =
+                    itemTypes.length === 0
+                        ? typeBuilder.getPrimitiveType("any")
+                        : typeBuilder.getUnionType(
+                              emptyTypeAttributes,
+                              new Set(itemTypes),
+                          );
             } else if (
                 typeof items === "object" ||
                 typeof items === "boolean"
