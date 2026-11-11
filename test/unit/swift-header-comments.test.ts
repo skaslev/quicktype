@@ -11,6 +11,7 @@ import { describe, expect, test } from "vitest";
 async function renderSwift(
     schema: object,
     rendererOptions: RendererOptions = {},
+    leadingComments?: string[],
 ): Promise<string> {
     const schemaInput = new JSONSchemaInput(undefined);
     await schemaInput.addSource({
@@ -25,6 +26,7 @@ async function renderSwift(
         inputData,
         lang: "swift",
         rendererOptions,
+        leadingComments,
     });
     return result.lines.join("\n");
 }
@@ -34,6 +36,10 @@ const point = {
     properties: { x: { type: "integer" } },
     required: ["x"],
 };
+function count(output: string, s: string): number {
+    return output.split(s).length - 1;
+}
+
 const convenienceUsage = "//   let topLevel = try TopLevel(json)";
 const decoderUsage =
     "//   let topLevel = try? JSONDecoder().decode(TopLevel.self, from: jsonData)";
@@ -74,5 +80,38 @@ describe("Swift usage comments", () => {
         );
         expect(output).not.toContain("To parse the JSON");
         expect(output).not.toContain("let topLevel =");
+    });
+});
+
+describe("A single Swift file's header", () => {
+    // Two classes: `TopLevel` and `Point`.
+    const line = {
+        type: "object",
+        properties: { from: point, to: point },
+        required: ["from", "to"],
+    };
+
+    test("is emitted once, not once per class", async () => {
+        const output = await renderSwift(line, {
+            alamofire: "true",
+            protocol: "hashable",
+        });
+
+        expect(count(output, "// This file was generated")).toBe(1);
+        expect(count(output, "// To parse values from Alamofire")).toBe(1);
+        expect(count(output, "// Hashable or Equatable:")).toBe(1);
+        // Only top-levels have Alamofire response handlers.
+        expect(output).toContain(
+            "//   Alamofire.request(url).responseTopLevel",
+        );
+        expect(output).not.toContain("responsePoint");
+    });
+
+    test("has the leading comments once, instead of the usage", async () => {
+        const output = await renderSwift(line, {}, ["Leading comment"]);
+
+        expect(count(output, "// Leading comment")).toBe(1);
+        expect(output).not.toContain("// This file was generated");
+        expect(output.startsWith("// Leading comment\n")).toBe(true);
     });
 });

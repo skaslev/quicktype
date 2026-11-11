@@ -248,7 +248,14 @@ export class SwiftRenderer extends ConvenienceRenderer {
         return null;
     }
 
+    /// The comments at the top of a single file, for all its types: the
+    /// leading comments, or how to parse each top-level.
     private renderSingleFileHeaderComments(): void {
+        if (this.leadingComments !== undefined) {
+            this.emitComments(this.leadingComments);
+            return;
+        }
+
         this.emitLineOnce(
             "// This file was generated from JSON Schema using quicktype, do not modify it directly.",
         );
@@ -259,7 +266,9 @@ export class SwiftRenderer extends ConvenienceRenderer {
             "// To parse the JSON, add this file to your project and do:",
         );
         this.emitLineOnce("//");
+        const topLevelNames: Name[] = [];
         this.forEachTopLevel("none", (t, topLevelName) => {
+            topLevelNames.push(topLevelName);
             // Classes have convenience initializers, and so do top-level
             // arrays and maps, but enums, unions (also nullable ones, which
             // are optionals) and primitive types don't.
@@ -289,13 +298,64 @@ export class SwiftRenderer extends ConvenienceRenderer {
                 );
             }
         });
+
+        if (this._options.alamofire) {
+            this.emitAlamofireUsage(topLevelNames);
+        }
+
+        this.emitProtocolNote();
+    }
+
+    /// How to parse each of `names` from Alamofire responses.
+    private emitAlamofireUsage(names: readonly Name[]): void {
+        this.emitLine("//");
+        this.emitLine("// To parse values from Alamofire responses:");
+        for (const name of names) {
+            this.emitLine("//");
+            this.emitLine(
+                "//   Alamofire.request(url).response",
+                name,
+                " { response in",
+            );
+            this.emitLine(
+                "//     if let ",
+                modifySource(camelCase, name),
+                " = response.result.value {",
+            );
+            this.emitLine("//       ...");
+            this.emitLine("//     }");
+            this.emitLine("//   }");
+        }
+    }
+
+    private emitProtocolNote(): void {
+        if (
+            !this._options.protocol.hashable &&
+            !this._options.protocol.equatable
+        ) {
+            return;
+        }
+
+        this.emitLine("//");
+        this.emitLine("// Hashable or Equatable:");
+        this.emitLine(
+            "// The compiler will not be able to synthesize the implementation of Hashable or Equatable",
+        );
+        this.emitLine(
+            "// for types that require the use of JSONAny, nor will the implementation of Hashable be",
+        );
+        this.emitLine(
+            "// synthesized for types that have collections (such as arrays or dictionaries).",
+        );
     }
 
     private renderHeader(type: Type, name: Name): void {
-        if (this.leadingComments !== undefined) {
-            this.emitComments(this.leadingComments);
-        } else if (!this._options.justTypes) {
-            if (this._options.multiFileOutput) {
+        // A single file has its comments at the top, once for all its types
+        // (see `renderSingleFileHeaderComments`).
+        if (this._options.multiFileOutput) {
+            if (this.leadingComments !== undefined) {
+                this.emitComments(this.leadingComments);
+            } else if (!this._options.justTypes) {
                 this.emitLineOnce(
                     "// This file was generated from JSON Schema using quicktype, do not modify it directly.",
                 );
@@ -324,42 +384,12 @@ export class SwiftRenderer extends ConvenienceRenderer {
                         ".self, from: jsonData)",
                     );
                 }
-            }
 
-            if (this._options.alamofire) {
-                this.emitLine("//");
-                this.emitLine("// To parse values from Alamofire responses:");
-                this.emitLine("//");
-                this.emitLine(
-                    "//   Alamofire.request(url).response",
-                    name,
-                    " { response in",
-                );
-                this.emitLine(
-                    "//     if let ",
-                    modifySource(camelCase, name),
-                    " = response.result.value {",
-                );
-                this.emitLine("//       ...");
-                this.emitLine("//     }");
-                this.emitLine("//   }");
-            }
+                if (this._options.alamofire) {
+                    this.emitAlamofireUsage([name]);
+                }
 
-            if (
-                this._options.protocol.hashable ||
-                this._options.protocol.equatable
-            ) {
-                this.emitLine("//");
-                this.emitLine("// Hashable or Equatable:");
-                this.emitLine(
-                    "// The compiler will not be able to synthesize the implementation of Hashable or Equatable",
-                );
-                this.emitLine(
-                    "// for types that require the use of JSONAny, nor will the implementation of Hashable be",
-                );
-                this.emitLine(
-                    "// synthesized for types that have collections (such as arrays or dictionaries).",
-                );
+                this.emitProtocolNote();
             }
         }
 
