@@ -681,16 +681,21 @@ func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, 
     }
 
     protected emitSourceStructure(): void {
-        if (
-            this._options.multiFileOutput === false &&
-            this._options.justTypes === false &&
-            this._options.justTypesAndPackage === false
-        ) {
-            if (this.leadingComments !== undefined) {
-                this.emitComments(this.leadingComments);
-            } else {
-                this.emitSingleFileHeaderComments();
+        if (this._options.multiFileOutput === false) {
+            if (
+                this._options.justTypes === false &&
+                this._options.justTypesAndPackage === false
+            ) {
+                if (this.leadingComments !== undefined) {
+                    this.emitComments(this.leadingComments);
+                } else {
+                    this.emitSingleFileHeaderComments();
+                }
             }
+
+            // A single file imports everything before its first type: the
+            // types only emit the imports that aren't there yet, which Go
+            // doesn't allow after a declaration.
             this.emitPackageDefinitons(false, this.collectAllImports());
         }
 
