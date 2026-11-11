@@ -1,3 +1,5 @@
+import { arrayIntercalate } from "collection-utils";
+
 import {
     anyTypeIssueAnnotation,
     nullTypeIssueAnnotation,
@@ -7,6 +9,7 @@ import {
     type ForbiddenWordsInfo,
 } from "../../ConvenienceRenderer.js";
 import type { Name, Namer } from "../../Naming.js";
+import { minMaxItemsForType } from "../../attributes/Constraints.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import {
     matchType,
@@ -16,6 +19,7 @@ import {
 import {
     ClassType,
     type EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -45,7 +49,31 @@ export class CrystalRenderer extends ConvenienceRenderer {
     }
 
     protected forbiddenNamesForGlobalNamespace(): readonly string[] {
-        return keywords;
+        // `Present` holds optional tuple items that can be nil.
+        const needsPresent = Array.from(
+            this.typeGraph.allTypesUnordered(),
+        ).some((t) => t instanceof TupleType && this.tupleNeedsPresent(t));
+        return needsPresent ? [...keywords, "Present"] : keywords;
+    }
+
+    // Tuples are spelled out, `Tuple(A, B)`, unless the schema names them,
+    // which makes them an alias, or they're classes.
+    protected tupleNeedsName(t: TupleType): boolean {
+        return this.hasGivenName(t) || this.tupleIsClass(t);
+    }
+
+    /**
+     * Whether a tuple is a class with a field per item instead of a
+     * `Tuple`.  `Tuple` reads and writes JSON arrays of exactly its length,
+     * so tuples with optional items or a rest are classes.  So are tuples
+     * that contain themselves other than through a class: `Tuple` would be
+     * a recursive alias, which compiles but has no `new(pull)`.
+     */
+    private tupleIsClass(t: TupleType): boolean {
+        return (
+            !t.isFixedLength ||
+            this.isInCycleThrough(t, (c) => !(c instanceof ClassType))
+        );
     }
 
     protected forbiddenForObjectProperties(
@@ -137,7 +165,45 @@ export class CrystalRenderer extends ConvenienceRenderer {
 
                 return hasNull !== null ? ([name, "?"] as Sourcelike) : name;
             },
+            undefined,
+            (tupleType) =>
+                this.tupleNeedsName(tupleType)
+                    ? this.nameForNamedType(tupleType)
+                    : this.tupleSource(tupleType, withIssues),
         );
+    }
+
+    /** `Tuple(A, B)`. */
+    private tupleSource(t: TupleType, withIssues = false): Sourcelike {
+        return [
+            "Tuple(",
+            arrayIntercalate(
+                ", ",
+                t.items.map((item) => this.crystalType(item, withIssues)),
+            ),
+            ")",
+        ];
+    }
+
+    /**
+     * The type as an expression, for `T.new(pull)`: `T?` is a type only,
+     * the expression is `Union(T, Nil)`.
+     */
+    private crystalTypeExpression(t: Type): Sourcelike {
+        if (t.kind === "any") return "Union(JSON::Any, Nil)";
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable !== null) {
+                return ["Union(", this.crystalType(nullable), ", Nil)"];
+            }
+
+            const [hasNull] = removeNullFromUnion(t);
+            if (hasNull !== null) {
+                return ["Union(", this.nameForNamedType(t), ", Nil)"];
+            }
+        }
+
+        return this.crystalType(t);
     }
 
     private breakCycle(t: Type, withIssues: boolean): Sourcelike {
@@ -171,6 +237,239 @@ export class CrystalRenderer extends ConvenienceRenderer {
             });
 
         this.emitBlock(["class ", className], structBody);
+    }
+
+    /**
+     * Whether an optional item of a tuple can be nil.  Such an item is a
+     * `Present`, which keeps a missing item (nil) apart from a null one
+     * (`Present(nil)`).
+     */
+    private tupleItemNeedsPresent(t: TupleType, i: number): boolean {
+        return i >= t.minItems && t.items[i].isNullable;
+    }
+
+    private tupleNeedsPresent(t: TupleType): boolean {
+        return (
+            this.tupleIsClass(t) &&
+            t.items.some((_, i) => this.tupleItemNeedsPresent(t, i))
+        );
+    }
+
+    /**
+     * A property `itemN` per tuple item, and `rest` for the rest.  An
+     * optional item is nil if it's missing.
+     */
+    private tupleFields(t: TupleType): Array<[string, Sourcelike]> {
+        const fields = t.items.map((item, i): [string, Sourcelike] => {
+            const type = this.crystalType(item, true);
+            if (i < t.minItems) return [`item${i}`, type];
+            if (this.tupleItemNeedsPresent(t, i)) {
+                return [`item${i}`, ["Present(", type, ")?"]];
+            }
+
+            return [`item${i}`, this.nullableCrystalType(item, true)];
+        });
+        if (t.rest !== undefined) {
+            fields.push([
+                "rest",
+                ["Array(", this.crystalType(t.rest, true), ")"],
+            ]);
+        }
+
+        return fields;
+    }
+
+    protected emitTuple(t: TupleType, tupleName: Name): void {
+        this.emitDescription(this.descriptionForType(t));
+        if (!this.tupleIsClass(t)) {
+            this.emitLine(
+                "alias ",
+                tupleName,
+                " = ",
+                this.tupleSource(t, true),
+            );
+            return;
+        }
+
+        const fields = this.tupleFields(t);
+        this.emitLine("class ", tupleName);
+        this.indent(() => {
+            for (const [name, type] of fields) {
+                this.emitLine("property ", name, " : ", type);
+            }
+
+            this.ensureBlankLine();
+            this.emitLine(
+                "def initialize(",
+                arrayIntercalate(
+                    ", ",
+                    fields.map(
+                        ([name, type]): Sourcelike => ["@", name, " : ", type],
+                    ),
+                ),
+                ")",
+            );
+            this.emitLine("end");
+            this.ensureBlankLine();
+            this.emitTupleDecoder(t, tupleName);
+            this.ensureBlankLine();
+            this.emitTupleEncoder(t, tupleName);
+        });
+        this.emitLine("end");
+    }
+
+    /**
+     * Reads the required items, the optional ones that are there, then the
+     * rest.  A missing required item, a null element of a type that can't
+     * be null, or an element after the last item without a rest, are
+     * parse errors.
+     */
+    private emitTupleDecoder(t: TupleType, tupleName: Name): void {
+        const [minConstraint, maxConstraint] = minMaxItemsForType(t) ?? [];
+        this.emitLine("def self.new(pull : JSON::PullParser)");
+        this.indent(() => {
+            this.emitLine("pull.read_begin_array");
+            t.items.forEach((item, i) => {
+                const value = [this.crystalTypeExpression(item), ".new(pull)"];
+                if (i < t.minItems) {
+                    this.emitLine(`item${i} = `, value);
+                } else if (this.tupleItemNeedsPresent(t, i)) {
+                    this.emitLine(
+                        `item${i} = pull.kind.end_array? ? nil : Present.new(`,
+                        value,
+                        ")",
+                    );
+                } else {
+                    this.emitLine(
+                        `item${i} = pull.kind.end_array? ? nil : `,
+                        value,
+                    );
+                }
+            });
+
+            const rest = t.rest;
+            if (rest !== undefined) {
+                this.emitLine("rest = [] of ", this.crystalType(rest));
+                this.emitLine("until pull.kind.end_array?");
+                this.indent(() =>
+                    this.emitLine(
+                        "rest << ",
+                        this.crystalTypeExpression(rest),
+                        ".new(pull)",
+                    ),
+                );
+                this.emitLine("end");
+                // The rest's bounds, if the schema has them.
+                const count = `${t.items.length} + rest.size`;
+                const conditions: string[] = [];
+                if (
+                    minConstraint !== undefined &&
+                    minConstraint > t.items.length
+                ) {
+                    conditions.push(`${count} < ${minConstraint}`);
+                }
+
+                if (maxConstraint !== undefined) {
+                    conditions.push(`${count} > ${maxConstraint}`);
+                }
+
+                if (conditions.length > 0) {
+                    const bounds =
+                        maxConstraint === undefined
+                            ? `at least ${minConstraint}`
+                            : `${Math.max(t.minItems, minConstraint ?? 0)} to ${maxConstraint}`;
+                    this.emitLine(
+                        'pull.raise "Expected ',
+                        bounds,
+                        " elements for ",
+                        tupleName,
+                        '" if ',
+                        conditions.join(" || "),
+                    );
+                }
+            }
+
+            this.emitLine("pull.read_end_array");
+            this.emitLine(
+                "new(",
+                arrayIntercalate(
+                    ", ",
+                    this.tupleFields(t).map(([name]) => name),
+                ),
+                ")",
+            );
+        });
+        this.emitLine("end");
+    }
+
+    /**
+     * An item may only follow an optional item that is there: a JSON array
+     * can't leave a gap.
+     */
+    private tupleGapCondition(t: TupleType): string | undefined {
+        const conditions: string[] = [];
+        for (let i = t.minItems + 1; i < t.items.length; i++) {
+            conditions.push(`(@item${i - 1}.nil? && !@item${i}.nil?)`);
+        }
+
+        if (t.rest !== undefined && t.minItems < t.items.length) {
+            conditions.push(
+                `(@item${t.items.length - 1}.nil? && !@rest.empty?)`,
+            );
+        }
+
+        if (conditions.length === 0) return undefined;
+        if (conditions.length === 1) return conditions[0].slice(1, -1);
+        return conditions.join(" || ");
+    }
+
+    /**
+     * Writes the required items, the optional ones that are there, then
+     * the rest.
+     */
+    private emitTupleEncoder(t: TupleType, tupleName: Name): void {
+        this.emitLine("def to_json(json : JSON::Builder) : Nil");
+        this.indent(() => {
+            const gap = this.tupleGapCondition(t);
+            if (gap !== undefined) {
+                this.emitLine(
+                    'raise ArgumentError.new("An item of ',
+                    tupleName,
+                    ' follows a missing optional item") if ',
+                    gap,
+                );
+            }
+
+            this.emitLine("json.array do");
+            this.indent(() => {
+                t.items.forEach((_, i) => {
+                    if (i < t.minItems) {
+                        this.emitLine(`@item${i}.to_json(json)`);
+                    } else if (this.tupleItemNeedsPresent(t, i)) {
+                        this.emitLine(`@item${i}.try &.value.to_json(json)`);
+                    } else {
+                        this.emitLine(`@item${i}.try &.to_json(json)`);
+                    }
+                });
+                if (t.rest !== undefined) {
+                    this.emitLine("@rest.each &.to_json(json)");
+                }
+            });
+            this.emitLine("end");
+        });
+        this.emitLine("end");
+    }
+
+    protected emitPresent(): void {
+        this.ensureBlankLine();
+        this.emitMultiline(`# An optional tuple item that is there, even if it's nil.  A missing item
+# is nil.
+struct Present(T)
+    getter value : T
+
+    def initialize(@value : T)
+    end
+end`);
     }
 
     protected emitBlock(line: Sourcelike, f: () => void): void {
@@ -298,19 +597,16 @@ export class CrystalRenderer extends ConvenienceRenderer {
 
     /**
      * Whether a union contains itself other than through a class, i.e.
-     * whether its alias would refer to itself.
+     * whether its alias would refer to itself.  Tuples in such a cycle are
+     * classes, too.
      */
     private isRecursiveUnion(u: UnionType): boolean {
-        const seen = new Set<Type>();
-        const work = Array.from(u.getNonAttributeChildren());
-        for (let t = work.pop(); t !== undefined; t = work.pop()) {
-            if (t === u) return true;
-            if (seen.has(t) || t instanceof ClassType) continue;
-            seen.add(t);
-            work.push(...t.getNonAttributeChildren());
-        }
-
-        return false;
+        return this.isInCycleThrough(
+            u,
+            (c) =>
+                !(c instanceof ClassType) &&
+                !(c instanceof TupleType && this.tupleIsClass(c)),
+        );
     }
 
     protected emitTopLevelAlias(t: Type, name: Name): void {
@@ -338,11 +634,27 @@ export class CrystalRenderer extends ConvenienceRenderer {
             "leading-and-interposing",
             (c: ClassType, name: Name) => this.emitStructDefinition(c, name),
         );
+
+        const tuples: Array<[TupleType, TupleType]> = [];
+        const ignore = (): void => undefined;
+        this.forEachNamedType("none", ignore, ignore, ignore, (t) =>
+            tuples.push([t, t]),
+        );
+        this.forEachSpecificNamedType(
+            "leading-and-interposing",
+            tuples,
+            (t, name) => this.emitTuple(t, name),
+        );
+
         this.forEachEnum("leading-and-interposing", (e, name) =>
             this.emitEnumDefinition(e, name),
         );
         this.forEachUnion("leading-and-interposing", (u, name) =>
             this.emitUnion(u, name),
         );
+
+        if (tuples.some(([t]) => this.tupleNeedsPresent(t))) {
+            this.emitPresent();
+        }
     }
 }

@@ -118,10 +118,8 @@ describe("targets with tuples", () => {
 });
 
 describe("other targets", () => {
-    // Crystal would declare recursive aliases, which JSON::Serializable
-    // can't parse; the Ruby and PHP renderers fail on such unions.
+    // The Ruby and PHP renderers fail on such unions.
     test.each([
-        ["crystal", "Array(JSON::Any?)"],
         ["ruby", "Types.Array(Types::Any)"],
         ["php", "private array $root;"],
     ] as const)("%s gets any for a tuple's reference to itself", async (lang, expected) => {
