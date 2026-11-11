@@ -448,11 +448,17 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         return [...keywords, ...this._forbiddenGlobalNames];
     }
 
+    // A member hides the type of the same name in the rest of its class, and
+    // can't have the name of its class if the class has a constructor.
     protected forbiddenForObjectProperties(
         _c: ClassType,
         _className: Name,
     ): ForbiddenWordsInfo {
-        return { names: [], includeGlobalForbidden: true };
+        return {
+            names: [],
+            includeGlobalForbidden: true,
+            includeGlobalNames: true,
+        };
     }
 
     protected forbiddenForEnumCases(
