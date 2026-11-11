@@ -605,10 +605,15 @@ export class ObjectiveCRenderer extends ConvenienceRenderer {
 
     private topLevelToDataPrototype(name: Name, pad = false): Sourcelike {
         const parameter = this.variableNameForTopLevel(name);
+        // Align the return type with the top-level's, unless that's
+        // shorter.
         const padding = pad
             ? repeatString(
                   " ",
-                  this.sourcelikeToString(name).length - "NSData".length,
+                  Math.max(
+                      0,
+                      this.sourcelikeToString(name).length - "NSData".length,
+                  ),
               )
             : "";
         return [
@@ -626,10 +631,15 @@ export class ObjectiveCRenderer extends ConvenienceRenderer {
 
     private topLevelToJSONPrototype(name: Name, pad = false): Sourcelike {
         const parameter = this.variableNameForTopLevel(name);
+        // Align the return type with the top-level's, unless that's
+        // shorter.
         const padding = pad
             ? repeatString(
                   " ",
-                  this.sourcelikeToString(name).length - "NSString".length,
+                  Math.max(
+                      0,
+                      this.sourcelikeToString(name).length - "NSString".length,
+                  ),
               )
             : "";
         return [
