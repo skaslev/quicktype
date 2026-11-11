@@ -3765,7 +3765,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 );
                 this.superThis.ensureBlankLine();
 
-                if (this.superThis.haveOptionalProperties) {
+                // Optional properties and nullable types (unions with null)
+                // are optionals.
+                if (
+                    this.superThis.haveOptionalProperties ||
+                    this.superThis.haveUnions
+                ) {
                     this.superThis.emitLine(
                         "template<typename TF, typename TT>",
                     );
