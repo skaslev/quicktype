@@ -1,5 +1,5 @@
 import { type Name, funPrefixNamer } from "../../Naming.js";
-import type { Type } from "../../Type/index.js";
+import { TupleType, type Type } from "../../Type/index.js";
 import {
     allLowerWordStyle,
     allUpperWordStyle,
@@ -81,7 +81,8 @@ export const wrapOption = (s: string, optional: boolean): string => {
  * read non-object JSON with upickle, so try the most discriminating
  * decoders first -- enums (which accept only their known strings), then
  * strings, then the other primitives, tuples (which accept only their
- * length) before arrays, classes last.
+ * lengths, fixed-length ones first, those with a rest last) before arrays,
+ * classes last.
  */
 export const unionMemberSortOrder = (_: Name, t: Type): string => {
     const priority: Partial<Record<Type["kind"], string>> = {
@@ -95,7 +96,13 @@ export const unionMemberSortOrder = (_: Name, t: Type): string => {
         map: "8",
         class: "A",
     };
-    return `${priority[t.kind] ?? "9"}${t.kind}`;
+    const lengths =
+        t instanceof TupleType
+            ? t.rest === undefined
+                ? Math.min(t.items.length - t.minItems, 8).toString()
+                : "9"
+            : "";
+    return `${priority[t.kind] ?? "9"}${lengths}${t.kind}`;
 };
 
 function isPartCharacter(codePoint: number): boolean {

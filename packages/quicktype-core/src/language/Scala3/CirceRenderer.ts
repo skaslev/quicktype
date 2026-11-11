@@ -1,3 +1,5 @@
+import { arrayIntercalate } from "collection-utils";
+
 import type { Name } from "../../Naming.js";
 import type { Sourcelike } from "../../Source.js";
 import {
@@ -17,7 +19,7 @@ import type {
 
 import { stringEscape, utf16StringEscape } from "../../support/Strings.js";
 
-import { Scala3Renderer } from "./Scala3Renderer.js";
+import { Scala3Renderer, type TupleField } from "./Scala3Renderer.js";
 import {
     propertyNameNeedsMapping,
     unionMemberSortOrder,
@@ -205,6 +207,134 @@ export class CirceRenderer extends Scala3Renderer {
                 this.caseClassOfTuple(t, tupleName, "t"),
                 "))",
             ]);
+        });
+        this.ensureBlankLine();
+    }
+
+    // The case class is a JSON array: the required items, the optional
+    // ones that are present, then the rest.  An item after a missing
+    // optional one is an error, as JSON can't leave a gap.  The decoder
+    // checks the array's length and decodes each element with its item's
+    // decoder, so that a null is only accepted where the item is nullable.
+    protected emitVariableLengthTupleCodecs(
+        t: TupleType,
+        tupleName: Name,
+    ): void {
+        const fields = this.variableLengthTupleFields(t);
+        const encode = (f: TupleField): Sourcelike => [
+            "Encoder[",
+            this.scalaType(f.type),
+            "].apply",
+        ];
+        const required = fields.filter((f) => f.kind === "required");
+        const encoded: Sourcelike[] = [
+            required.length === 0
+                ? "List.empty[Json]"
+                : [
+                      "List(",
+                      ...arrayIntercalate(
+                          ", ",
+                          required.map(
+                              (f): Sourcelike => [encode(f), `(t.${f.name})`],
+                          ),
+                      ),
+                      ")",
+                  ],
+            ...fields
+                .filter((f) => f.kind !== "required")
+                .map(
+                    (f): Sourcelike => [` ++ t.${f.name}.map(`, encode(f), ")"],
+                ),
+        ];
+        const gap = this.variableLengthTupleGap(t, "t");
+
+        const lengthChecks: string[] = [];
+        if (t.minItems > 0) lengthChecks.push(`n >= ${t.minItems}`);
+        if (t.rest === undefined) lengthChecks.push(`n <= ${t.items.length}`);
+
+        this.ensureBlankLine();
+        this.emitLine(["object ", tupleName, ":"]);
+        this.indent(() => {
+            this.emitLine([
+                "given Encoder[",
+                tupleName,
+                "] = Encoder.instance { t =>",
+            ]);
+            this.indent(() => {
+                if (gap !== undefined) {
+                    this.emitLine(["if ", gap, " then"]);
+                    this.indent(() =>
+                        this.emitLine([
+                            'throw new java.lang.IllegalArgumentException("',
+                            tupleName,
+                            ': an item follows a missing optional item")',
+                        ]),
+                    );
+                }
+
+                this.emitLine(["Json.fromValues(", ...encoded, ")"]);
+            });
+            this.emitLine("}");
+            this.emitLine([
+                "given Decoder[",
+                tupleName,
+                "] = Decoder.instance { c =>",
+            ]);
+            this.indent(() => {
+                this.emitLine("c.values.map(_.size) match");
+                this.indent(() => {
+                    this.emitLine([
+                        "case scala.Some(n)",
+                        lengthChecks.length === 0
+                            ? ""
+                            : ` if ${lengthChecks.join(" && ")}`,
+                        " =>",
+                    ]);
+                    this.indent(() => {
+                        this.emitLine("for");
+                        this.indent(() => {
+                            for (const f of fields) {
+                                const decoded: Sourcelike =
+                                    f.kind === "rest"
+                                        ? [
+                                              `c.withFocus(_.mapArray(_.drop(${f.index}))).as[Seq[`,
+                                              this.scalaType(f.type),
+                                              "]]",
+                                          ]
+                                        : [
+                                              `c.downN(${f.index}).as[`,
+                                              this.scalaType(f.type),
+                                              "]",
+                                          ];
+                                this.emitLine(
+                                    f.name,
+                                    " <- ",
+                                    f.kind === "optional"
+                                        ? [
+                                              `if n > ${f.index} then `,
+                                              decoded,
+                                              ".map(scala.Some(_)) else scala.Right(scala.None)",
+                                          ]
+                                        : decoded,
+                                );
+                            }
+                        });
+                        this.emitLine([
+                            "yield ",
+                            tupleName,
+                            "(",
+                            fields.map((f) => f.name).join(", "),
+                            ")",
+                        ]);
+                    });
+                    this.emitLine([
+                        'case _ => scala.Left(io.circe.DecodingFailure("',
+                        tupleName,
+                        `: expected ${this.expectedTupleLength(t)}", c.history))`,
+                    ]);
+                });
+            });
+            this.emitLine("}");
         });
         this.ensureBlankLine();
     }

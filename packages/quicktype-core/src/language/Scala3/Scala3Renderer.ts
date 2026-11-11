@@ -25,7 +25,7 @@ import {
     type EnumType,
     MapType,
     type ObjectType,
-    type TupleType,
+    TupleType,
     type Type,
     type UnionType,
 } from "../../Type/index.js";
@@ -45,6 +45,16 @@ import {
     upperNamingFunction,
     wrapOption,
 } from "./utils.js";
+
+/** A case class field of a tuple with optional items or a rest. */
+export interface TupleField {
+    name: string;
+    /** The item's type, or the rest's element type. */
+    type: Type;
+    kind: "required" | "optional" | "rest";
+    /** The JSON array index of the item, or of the rest's first element. */
+    index: number;
+}
 
 export class Scala3Renderer extends ConvenienceRenderer {
     public constructor(
@@ -208,21 +218,23 @@ export class Scala3Renderer extends ConvenienceRenderer {
     }
 
     // Tuples are spelled out, `(A, B)`, unless the schema names them or
-    // they contain themselves.
+    // they are case classes.
     protected tupleNeedsName(t: TupleType): boolean {
         return this.hasGivenName(t) || this.tupleIsCaseClass(t);
     }
 
     /**
      * Whether a tuple is declared as a case class instead of a type alias:
-     * a type alias can't refer to itself, other than through a class or an
-     * enum.  Unions are type aliases too.
+     * a Scala tuple has exactly one element per item, so a tuple with
+     * optional items or a rest is a case class, and a type alias can't
+     * refer to itself, other than through a class or an enum.  Unions are
+     * type aliases too.
      */
     protected tupleIsCaseClass(t: TupleType): boolean {
-        return this.isInCycleThrough(
-            t,
-            (c) => !["class", "enum"].includes(c.kind),
-        );
+        const isClass = (c: Type): boolean =>
+            ["class", "enum"].includes(c.kind) ||
+            (c instanceof TupleType && !c.isFixedLength);
+        return isClass(t) || this.isInCycleThrough(t, (c) => !isClass(c));
     }
 
     /** `(A, B)`; Scala has no literal syntax for a one-element tuple. */
@@ -375,6 +387,11 @@ export class Scala3Renderer extends ConvenienceRenderer {
 
     protected emitTupleDefinition(t: TupleType, tupleName: Name): void {
         this.emitDescription(this.descriptionForType(t));
+        if (!t.isFixedLength) {
+            this.emitVariableLengthTupleDefinition(t, tupleName);
+            return;
+        }
+
         if (!this.tupleIsCaseClass(t)) {
             this.emitLine("type ", tupleName, " = ", this.tupleSource(t, true));
             return;
@@ -400,6 +417,110 @@ export class Scala3Renderer extends ConvenienceRenderer {
     protected emitTupleCaseClassCodecs(_t: TupleType, _tupleName: Name): void {
         // Overridden by frameworks, which (de)serialize the case class as
         // the tuple it stands for.
+    }
+
+    /**
+     * The case class of a tuple with optional items or a rest: a field per
+     * item, `item0`, `item1`, ..., an `Option` for each optional one, and a
+     * `Seq` for the rest.  `[A, B?, ...C[]]` is `(item0: A, item1:
+     * Option[B], rest: Seq[C])`.  An optional item of a nullable type is an
+     * `Option[Option[T]]`, which keeps a missing item apart from a null one.
+     */
+    protected emitVariableLengthTupleDefinition(
+        t: TupleType,
+        tupleName: Name,
+    ): void {
+        const fields = this.variableLengthTupleFields(t).map(
+            (f): Sourcelike => {
+                const scalaType = this.scalaType(f.type, true);
+                return [
+                    f.name,
+                    ": ",
+                    f.kind === "required"
+                        ? scalaType
+                        : [
+                              f.kind === "optional" ? "Option[" : "Seq[",
+                              scalaType,
+                              "]",
+                          ],
+                ];
+            },
+        );
+        this.emitLine(
+            "case class ",
+            tupleName,
+            "(",
+            ...arrayIntercalate(", ", fields),
+            ")",
+        );
+        this.emitVariableLengthTupleCodecs(t, tupleName);
+    }
+
+    protected emitVariableLengthTupleCodecs(
+        _t: TupleType,
+        _tupleName: Name,
+    ): void {
+        // Overridden by frameworks, which read and write the case class as
+        // a JSON array.
+    }
+
+    protected variableLengthTupleFields(t: TupleType): TupleField[] {
+        const fields = t.items.map(
+            (type, index): TupleField => ({
+                name: `item${index}`,
+                type,
+                kind: index < t.minItems ? "required" : "optional",
+                index,
+            }),
+        );
+        if (t.rest !== undefined) {
+            fields.push({
+                name: "rest",
+                type: t.rest,
+                kind: "rest",
+                index: t.items.length,
+            });
+        }
+
+        return fields;
+    }
+
+    /**
+     * A condition on the case class `value` that holds if an item follows
+     * a missing optional item, which a JSON array can't express: the
+     * optional items and the rest present, then a missing one, then a
+     * present one.  Undefined if there can't be such a gap.
+     */
+    protected variableLengthTupleGap(
+        t: TupleType,
+        value: string,
+    ): Sourcelike | undefined {
+        const present = this.variableLengthTupleFields(t)
+            .filter((f) => f.kind !== "required")
+            .map((f) => `${value}.${f.name}.nonEmpty`);
+        if (present.length < 2) return undefined;
+        return [
+            "List(",
+            present.join(", "),
+            ").dropWhile(identity).contains(true)",
+        ];
+    }
+
+    /** What a tuple with optional items or a rest expects, for errors. */
+    protected expectedTupleLength(t: TupleType): string {
+        const elements = (n: number): string =>
+            n === 1 ? "1 element" : `${n} elements`;
+        const min = t.minItems;
+        const max = t.items.length;
+        if (t.rest !== undefined) {
+            return min === 0
+                ? "an array"
+                : `an array of at least ${elements(min)}`;
+        }
+
+        return min === 0
+            ? `an array of at most ${elements(max)}`
+            : `an array of ${min} to ${max} elements`;
     }
 
     /** `(x._1, x._2)` for a case class standing for a tuple. */

@@ -1,6 +1,6 @@
 // circe and upickle (de)serialize Scala tuples as JSON arrays of exactly
 // their length, so Scala 3 keeps fixed-length tuples.  Other tuple shapes
-// stay arrays of a union.
+// are case classes with codecs of their own, see scala3-tuple-rest.test.ts.
 
 import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
 import { expect, test } from "vitest";
@@ -61,13 +61,13 @@ test.each([
     ],
     ["a top-level tuple", pair, "type TopLevel = (String, Double)"],
     [
-        "rest elements become an array",
+        "rest elements become a case class",
         {
             type: "array",
             prefixItems: [{ type: "string" }],
             items: { type: "integer" },
         },
-        "type TopLevel = List[TopLevelElement]",
+        "case class TopLevel(item0: String, rest: Seq[Long])",
     ],
 ] as const)("%s", async (_, schema, expected) => {
     expect(await renderSchema(schema)).toContain(expected);

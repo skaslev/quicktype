@@ -62,9 +62,10 @@ export class Scala3TargetLanguage extends TargetLanguage<
     }
 
     // circe and upickle (de)serialize tuples as arrays of exactly their
-    // length.
+    // length; tuples with optional items or a rest are case classes with
+    // codecs of their own.
     public get tupleSupport(): TupleSupport {
-        return "fixed";
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "scala3">(
