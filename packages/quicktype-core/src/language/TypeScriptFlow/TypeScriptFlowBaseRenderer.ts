@@ -96,10 +96,27 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
         return singleWord([parenIfNeeded(itemType), "[]"]);
     }
 
+    /** Whether the options make a union declared by name. */
+    private declaresUnion(u: UnionType): boolean {
+        return (
+            this._tsFlowOptions.declareUnions && nullableFromUnion(u) === null
+        );
+    }
+
     /** Whether a union is spelled out as `a | b` instead of by name. */
     private inlinesUnion(u: UnionType): boolean {
+        return !this.declaresUnion(u) && !this.unionIsRecursive(u);
+    }
+
+    // Without the type map, a cycle also ends at a declared union.
+    protected cyclePassesThrough(t: Type): boolean {
         return (
-            !this._tsFlowOptions.declareUnions || nullableFromUnion(u) !== null
+            super.cyclePassesThrough(t) &&
+            !(
+                this._tsFlowOptions.justTypes &&
+                t instanceof UnionType &&
+                this.declaresUnion(t)
+            )
         );
     }
 
@@ -268,7 +285,7 @@ export abstract class TypeScriptFlowBaseRenderer extends JavaScriptRenderer {
     }
 
     protected emitUnion(u: UnionType, unionName: Name): void {
-        if (!this._tsFlowOptions.declareUnions) {
+        if (this.inlinesUnion(u)) {
             return;
         }
 

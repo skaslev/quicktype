@@ -1,4 +1,4 @@
-import { arrayIntercalate } from "collection-utils";
+import { arrayIntercalate, iterableFirst } from "collection-utils";
 
 import {
     minMaxItemsForType,
@@ -22,16 +22,18 @@ import {
     splitIntoWords,
     utf16StringEscape,
 } from "../../support/Strings.js";
-import { panic } from "../../support/Support.js";
+import { assert, panic } from "../../support/Support.js";
 import type { TargetLanguage } from "../../TargetLanguage.js";
-import type {
-    ClassProperty,
-    ClassType,
-    ObjectType,
-    Type,
+import {
+    type ClassProperty,
+    type ClassType,
+    type ObjectType,
+    type Type,
+    UnionType,
 } from "../../Type/index.js";
 import {
-    directlyReachableSingleNamedType,
+    directlyReachableTypes,
+    isNamedType,
     matchType,
 } from "../../Type/TypeUtils.js";
 
@@ -51,7 +53,29 @@ export interface JavaScriptTypeAnnotations {
 
 const identityNamingFunction = funPrefixNamer("properties", (s) => s);
 
+/**
+ * Whether `t` contains itself through types for which `passesThrough`
+ * holds.
+ */
+function isInCycleThrough(
+    t: Type,
+    passesThrough: (t: Type) => boolean,
+): boolean {
+    const seen = new Set<Type>();
+    const work = Array.from(t.getNonAttributeChildren());
+    for (let c = work.pop(); c !== undefined; c = work.pop()) {
+        if (c === t) return true;
+        if (seen.has(c) || !passesThrough(c)) continue;
+        seen.add(c);
+        work.push(...c.getNonAttributeChildren());
+    }
+
+    return false;
+}
+
 export class JavaScriptRenderer extends ConvenienceRenderer {
+    private readonly _recursiveUnions = new Map<UnionType, boolean>();
+
     public constructor(
         targetLanguage: TargetLanguage,
         renderContext: RenderContext,
@@ -96,7 +120,51 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
             return undefined;
         }
 
-        return directlyReachableSingleNamedType(type);
+        // Like `directlyReachableSingleNamedType`, but a recursive union
+        // is named even if it's nullable, so this stops at it instead of
+        // going around its cycle.
+        const definedTypes = directlyReachableTypes(type, (t) =>
+            t instanceof UnionType
+                ? this.unionNeedsName(t)
+                    ? new Set([t])
+                    : null
+                : isNamedType(t)
+                  ? new Set([t])
+                  : null,
+        );
+        assert(
+            definedTypes.size <= 1,
+            "Cannot have more than one defined type per top-level",
+        );
+        return iterableFirst(definedTypes);
+    }
+
+    protected unionNeedsName(u: UnionType): boolean {
+        return super.unionNeedsName(u) || this.unionIsRecursive(u);
+    }
+
+    /**
+     * Whether a cycle of types passes through `t` without referring to it
+     * by name.  The type map spells out everything but classes and enums.
+     */
+    protected cyclePassesThrough(t: Type): boolean {
+        return !["class", "object", "enum"].includes(t.kind);
+    }
+
+    /**
+     * Whether a union contains itself through types that are spelled out
+     * where they're used, e.g. through an array: `Node = string | Node[]`.
+     * Such a union can only be written down by name, so the type map (and
+     * in TypeScript and Flow, the type declarations) refer to it by name.
+     */
+    protected unionIsRecursive(u: UnionType): boolean {
+        let recursive = this._recursiveUnions.get(u);
+        if (recursive === undefined) {
+            recursive = isInCycleThrough(u, (t) => this.cyclePassesThrough(t));
+            this._recursiveUnions.set(u, recursive);
+        }
+
+        return recursive;
     }
 
     protected makeNameForProperty(
@@ -119,7 +187,10 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
     }
 
     protected typeMapTypeFor(t: Type): Sourcelike {
-        if (["class", "object", "enum"].includes(t.kind)) {
+        if (
+            ["class", "object", "enum"].includes(t.kind) ||
+            (t instanceof UnionType && this.unionIsRecursive(t))
+        ) {
             return ['r("', this.nameForNamedType(t), '")'];
         }
 
@@ -142,12 +213,7 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
             (_classType) => panic("We handled this above"),
             (mapType) => ["m(", this.typeMapTypeFor(mapType.values), ")"],
             (_enumType) => panic("We handled this above"),
-            (unionType) => {
-                const children = Array.from(unionType.getChildren()).map(
-                    (type: Type) => this.typeMapTypeFor(type),
-                );
-                return ["u(", ...arrayIntercalate(", ", children), ")"];
-            },
+            (unionType) => this.typeMapTypeForUnion(unionType),
             (transformedStringType) => {
                 if (transformedStringType.kind === "date-time") {
                     return "Date";
@@ -158,6 +224,13 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
                 return '""';
             },
         );
+    }
+
+    private typeMapTypeForUnion(u: UnionType): Sourcelike {
+        const children = Array.from(u.getChildren()).map((type: Type) =>
+            this.typeMapTypeFor(type),
+        );
+        return ["u(", ...arrayIntercalate(", ", children), ")"];
     }
 
     private typeMapString(t: Type): Sourcelike {
@@ -240,6 +313,16 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
                     });
                 });
                 this.emitLine("],");
+            });
+            this.forEachUnion("none", (u, name) => {
+                if (!this.unionIsRecursive(u)) return;
+                this.emitLine(
+                    '"',
+                    name,
+                    '": ',
+                    this.typeMapTypeForUnion(u),
+                    ",",
+                );
             });
         });
     }
