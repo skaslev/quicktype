@@ -3407,7 +3407,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         isClassMember: boolean,
         includes: IncludeMap,
         propertyType: Type,
-        _defName: string,
+        definedType: Type,
     ): void {
         const propTypes = this.generatedTypes(isClassMember, propertyType);
 
@@ -3432,6 +3432,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                         : IncludeKind.ForwardDeclare;
                 if (t.forceInclude) {
                     propRecord.kind = IncludeKind.Include;
+                }
+                /**
+                 * A class that contains the type being defined is in a cycle with
+                 * it, so it's held through a std::shared_ptr or in a container,
+                 * where a declaration is enough.  Its header includes this one.
+                 */
+                if (this.typeReaches(t.type, definedType)) {
+                    propRecord.kind = IncludeKind.ForwardDeclare;
                 }
             } else if (t.type instanceof EnumType) {
                 propRecord.typeKind = "enum";
@@ -3479,7 +3487,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         const includes: IncludeMap = new Map();
 
         if (c instanceof UnionType) {
-            this.updateIncludes(false, includes, c, defName);
+            this.updateIncludes(false, includes, c, c);
             if (this.isRecursiveUnion(c)) {
                 // A recursive union is a struct deriving from the variant,
                 // which needs the classes it holds by value to be complete:
@@ -3498,7 +3506,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 c,
                 "none",
                 (_name, _jsonName, property) => {
-                    this.updateIncludes(true, includes, property.type, defName);
+                    this.updateIncludes(true, includes, property.type, c);
                 },
             );
         }

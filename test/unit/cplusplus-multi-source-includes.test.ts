@@ -49,6 +49,31 @@ function forwardDeclarations(source: string): string[] {
     );
 }
 
+function object(properties: object, required: string[]): object {
+    return {
+        type: "object",
+        properties,
+        required,
+        additionalProperties: false,
+    };
+}
+
+const ref = (name: string) => ({ $ref: `#/definitions/${name}` });
+const arrayOf = (items: object) => ({ type: "array", items });
+
+// Whether a header includes the header of a type or declares it.
+async function inclusion(
+    schema: object,
+    filename: string,
+    type: string,
+): Promise<string[]> {
+    const source = await header(schema, filename);
+    return [
+        ...(includedHeaders(source).includes(type) ? ["include"] : []),
+        ...(forwardDeclarations(source).includes(type) ? ["forward"] : []),
+    ];
+}
+
 const leaf = {
     type: "object",
     properties: { value: { type: "integer" } },
@@ -164,5 +189,83 @@ describe("C++ multi-source nested unions", () => {
             "using TopLevel = std::variant<int64_t, std::map<std::string, TopLevelValue>>;",
         );
         expect(includedHeaders(source)).toContain("TopLevelValue");
+    });
+});
+
+describe("C++ multi-source mutually recursive types", () => {
+    test("classes held in std::shared_ptr don't include each other", async () => {
+        const schema = {
+            $ref: "#/definitions/A",
+            definitions: {
+                A: object({ name: { type: "string" }, b: ref("B") }, [
+                    "name",
+                    "b",
+                ]),
+                B: object({ a: ref("A") }, []),
+            },
+        };
+        expect(await header(schema, "TopLevel.hpp")).toContain(
+            "std::shared_ptr<B> b;",
+        );
+        expect(await inclusion(schema, "TopLevel.hpp", "B")).toEqual([
+            "forward",
+        ]);
+        expect(await inclusion(schema, "B.hpp", "TopLevel")).toEqual([
+            "forward",
+        ]);
+    });
+
+    test("classes in each other's arrays don't include each other", async () => {
+        const schema = {
+            $ref: "#/definitions/A",
+            definitions: {
+                A: object({ bs: arrayOf(ref("B")) }, ["bs"]),
+                B: object({ as: arrayOf(ref("A")) }, ["as"]),
+            },
+        };
+        expect(await inclusion(schema, "TopLevel.hpp", "B")).toEqual([
+            "forward",
+        ]);
+        expect(await inclusion(schema, "B.hpp", "TopLevel")).toEqual([
+            "forward",
+        ]);
+    });
+
+    test("a union doesn't include a class that contains it", async () => {
+        const schema = {
+            $ref: "#/definitions/U",
+            definitions: {
+                U: { anyOf: [arrayOf(ref("A")), { type: "string" }] },
+                A: object({ u: ref("U") }, ["u"]),
+            },
+        };
+        expect(await inclusion(schema, "TopLevel.hpp", "A")).toEqual([
+            "forward",
+        ]);
+        expect(await inclusion(schema, "A.hpp", "TopLevel")).toEqual([
+            "include",
+        ]);
+    });
+
+    test("a class outside the cycle includes the classes in it", async () => {
+        const schema = {
+            ...object({ nodes: arrayOf(ref("Node")), root: ref("Node") }, [
+                "nodes",
+                "root",
+            ]),
+            definitions: {
+                Node: object({ children: arrayOf(ref("Child")) }, ["children"]),
+                Child: object({ parent: ref("Node") }, []),
+            },
+        };
+        expect(await inclusion(schema, "TopLevel.hpp", "Node")).toEqual([
+            "include",
+        ]);
+        expect(await inclusion(schema, "Node.hpp", "Child")).toEqual([
+            "forward",
+        ]);
+        expect(await inclusion(schema, "Child.hpp", "Node")).toEqual([
+            "forward",
+        ]);
     });
 });
