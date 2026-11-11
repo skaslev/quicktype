@@ -1,3 +1,5 @@
+import { iterableFirst } from "collection-utils";
+
 import {
     anyTypeIssueAnnotation,
     nullTypeIssueAnnotation,
@@ -25,11 +27,13 @@ import {
     ClassType,
     EnumType,
     MapType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import {
-    directlyReachableSingleNamedType,
+    directlyReachableTypes,
+    isNamedType,
     matchType,
     nullableFromUnion,
     removeNullFromUnion,
@@ -43,6 +47,13 @@ import {
 } from "./DateTimeProvider.js";
 import type { javaOptions } from "./language.js";
 import { javaNameStyle, stringEscape } from "./utils.js";
+
+export interface TupleField {
+    name: string;
+    type: Type;
+    javaType: Sourcelike;
+    kind: "required" | "optional" | "optional-nullable" | "rest";
+}
 
 export class JavaRenderer extends ConvenienceRenderer {
     private _currentFilename: string | undefined;
@@ -121,11 +132,28 @@ export class JavaRenderer extends ConvenienceRenderer {
         return nullableFromUnion(u) === null;
     }
 
+    // Every tuple is a class, with a field per item.
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return true;
+    }
+
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
         // If the top-level type doesn't contain any classes or unions
         // we have to define a class just for the `FromJson` method, in
-        // emitFromJsonForTopLevel.
-        return directlyReachableSingleNamedType(type);
+        // emitFromJsonForTopLevel.  Tuples are classes, too: the named
+        // types in their items aren't reachable directly.
+        const definedTypes = directlyReachableTypes(type, (t) => {
+            const isDefined =
+                t instanceof UnionType
+                    ? nullableFromUnion(t) === null
+                    : t instanceof TupleType || isNamedType(t);
+            return isDefined ? new Set([t]) : null;
+        });
+        assert(
+            definedTypes.size <= 1,
+            "Cannot have more than one defined type per top-level",
+        );
+        return iterableFirst(definedTypes);
     }
 
     protected makeNamesForPropertyGetterAndSetter(
@@ -364,6 +392,7 @@ export class JavaRenderer extends ConvenienceRenderer {
 
                 return "String";
             },
+            (tupleType) => this.nameForNamedType(tupleType),
         );
     }
 
@@ -413,6 +442,8 @@ export class JavaRenderer extends ConvenienceRenderer {
 
                 return [];
             },
+            // The tuple's class imports what its items need.
+            (_tupleType) => [],
         );
     }
 
@@ -493,6 +524,129 @@ export class JavaRenderer extends ConvenienceRenderer {
         // biome-ignore lint/suspicious/useArraySortCompare: sorting strings; default UTF-16 order is intended
         imports.sort();
         return [...new Set(imports)];
+    }
+
+    /**
+     * The fields of a tuple's class.  Items have no names, so they are
+     * `item0`, `item1`, ... after their positions in the JSON array, and the
+     * rest, a list or array, is `rest`.  A missing optional item is null;
+     * if null is also a value of the item, the field is an `Optional`,
+     * which keeps them apart: null if the item is missing,
+     * `Optional.empty()` if it's null.
+     */
+    protected tupleFields(t: TupleType, withIssues = false): TupleField[] {
+        const fields: TupleField[] = t.items.map((item, i) => {
+            const name = `item${i}`;
+            if (i < t.minItems) {
+                return {
+                    name,
+                    type: item,
+                    javaType: this.javaType(false, item, withIssues),
+                    kind: "required",
+                };
+            }
+
+            if (item.isNullable) {
+                return {
+                    name,
+                    type: item,
+                    javaType: [
+                        "java.util.Optional<",
+                        this.javaType(true, item, withIssues),
+                        ">",
+                    ],
+                    kind: "optional-nullable",
+                };
+            }
+
+            return {
+                name,
+                type: item,
+                javaType: this.javaType(true, item, withIssues),
+                kind: "optional",
+            };
+        });
+        if (t.rest !== undefined) {
+            fields.push({
+                name: "rest",
+                type: t.rest,
+                javaType: this._options.useList
+                    ? ["List<", this.javaType(true, t.rest, withIssues), ">"]
+                    : [this.javaType(false, t.rest, withIssues), "[]"],
+                kind: "rest",
+            });
+        }
+
+        return fields;
+    }
+
+    protected importsForTuple(t: TupleType): string[] {
+        const imports: string[] = [];
+        for (const item of t.getNonAttributeChildren()) {
+            imports.push(...this.javaImport(item));
+        }
+
+        if (t.rest !== undefined && this._options.useList) {
+            imports.push("java.util.List");
+        }
+
+        // biome-ignore lint/suspicious/useArraySortCompare: sorting strings; default UTF-16 order is intended
+        imports.sort();
+        return [...new Set(imports)];
+    }
+
+    protected importsForTupleDefinition(t: TupleType): string[] {
+        return this.importsForTuple(t);
+    }
+
+    protected emitTupleAttributes(_t: TupleType, _tupleName: Name): void {
+        if (this._options.lombok) {
+            this.emitLine("@lombok.Data");
+        }
+    }
+
+    protected emitTupleSerializer(_t: TupleType, _tupleName: Name): void {
+        // empty
+    }
+
+    // Like a class: private fields with getters and setters.
+    protected emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        this.emitFileHeader(tupleName, this.importsForTupleDefinition(t));
+        this.emitDescription(this.descriptionForType(t));
+        this.emitTupleAttributes(t, tupleName);
+        this.emitBlock(["public class ", tupleName], () => {
+            for (const field of this.tupleFields(t, true)) {
+                this.emitLine("private ", field.javaType, " ", field.name, ";");
+            }
+
+            if (!this._options.lombok) {
+                for (const field of this.tupleFields(t)) {
+                    const capitalized = capitalize(field.name);
+                    this.ensureBlankLine();
+                    this.emitLine(
+                        "public ",
+                        field.javaType,
+                        " get",
+                        capitalized,
+                        "() { return ",
+                        field.name,
+                        "; }",
+                    );
+                    this.emitLine(
+                        "public void set",
+                        capitalized,
+                        "(",
+                        field.javaType,
+                        " value) { this.",
+                        field.name,
+                        " = value; }",
+                    );
+                }
+            }
+
+            this.emitTupleSerializer(t, tupleName);
+        });
+        this.finishFile();
     }
 
     protected emitClassDefinition(c: ClassType, className: Name): void {
@@ -736,6 +890,7 @@ export class JavaRenderer extends ConvenienceRenderer {
             (c: ClassType, n: Name) => this.emitClassDefinition(c, n),
             (e, n) => this.emitEnumDefinition(e, n),
             (u, n) => this.emitUnionDefinition(u, n),
+            (t, n) => this.emitTupleDefinition(t, n),
         );
     }
 }

@@ -10,6 +10,7 @@ import { TargetLanguage } from "../../TargetLanguage.js";
 import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
+    TupleSupport,
 } from "../../Type/index.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
@@ -67,6 +68,13 @@ export class JavaTargetLanguage extends TargetLanguage<
 
     public get supportsUnionsWithBothNumberTypes(): boolean {
         return true;
+    }
+
+    // A tuple is a class with a field per item.  Jackson reads it from and
+    // writes it to a JSON array with hand-written (de)serializers, which
+    // also handle optional items and a rest.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "java">(

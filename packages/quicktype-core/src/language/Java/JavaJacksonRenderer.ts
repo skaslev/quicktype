@@ -1,4 +1,4 @@
-import { iterableSome } from "collection-utils";
+import { arraySortByInto, iterableSome } from "collection-utils";
 
 import type { Name } from "../../Naming.js";
 import type { Sourcelike } from "../../Source.js";
@@ -8,6 +8,7 @@ import {
     type ClassProperty,
     ClassType,
     EnumType,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -19,6 +20,33 @@ import {
 
 import { JavaRenderer } from "./JavaRenderer.js";
 import { stringEscape } from "./utils.js";
+
+function elements(n: number): string {
+    return n === 1 ? "1 element" : `${n} elements`;
+}
+
+// What a tuple's JSON array must look like, for error messages.
+function expectedTupleLength(t: TupleType): string {
+    const min = t.minItems;
+    const max = t.items.length;
+    if (t.rest !== undefined) {
+        return min === 0 ? "an array" : `an array of at least ${elements(min)}`;
+    }
+
+    if (min === max) return `an array of ${elements(max)}`;
+    return min === 0
+        ? `an array of at most ${elements(max)}`
+        : `an array of ${min} to ${max} elements`;
+}
+
+// The order in which a union tries its array-like members on a JSON array:
+// those that take fewer lengths first, i.e. fixed-length tuples, tuples
+// with optional items, tuples with a rest, and the array last.
+function arrayMemberPriority(t: Type): number {
+    if (!(t instanceof TupleType)) return Number.POSITIVE_INFINITY;
+    if (t.rest !== undefined) return Number.MAX_SAFE_INTEGER;
+    return t.items.length - t.minItems;
+}
 
 export class JacksonRenderer extends JavaRenderer {
     protected readonly _converterKeywords: string[] = [
@@ -39,7 +67,36 @@ export class JacksonRenderer extends JavaRenderer {
         "DeserializationContext",
         "SerializerProvider",
         "None",
+        "JsonToken",
+        "TreeNode",
     ];
+
+    /**
+     * `parser.readValueAs(...)` for a value of type `t`.  Generic types are
+     * read with a `TypeReference`, which keeps their type arguments, and an
+     * explicit type argument, so that the call can be an argument itself:
+     * Java before 8 infers it only from an assignment.
+     */
+    private readValueAs(parser: Sourcelike, t: Type): Sourcelike {
+        const rendered = this.javaType(true, t);
+        if (this.sourcelikeToString(rendered).includes("<")) {
+            return [
+                parser,
+                ".<",
+                rendered,
+                ">readValueAs(new TypeReference<",
+                rendered,
+                ">() {})",
+            ];
+        }
+
+        return [
+            parser,
+            ".readValueAs(",
+            this.javaTypeWithoutGenerics(true, t),
+            ".class)",
+        ];
+    }
 
     private mapperType(t: Type): Sourcelike {
         if (this._options.useList && t instanceof ArrayType) {
@@ -145,6 +202,368 @@ export class JacksonRenderer extends JavaRenderer {
         }
 
         return assertNever(t);
+    }
+
+    protected importsForTupleDefinition(t: TupleType): string[] {
+        const imports = [
+            "java.io.IOException",
+            "com.fasterxml.jackson.core.*",
+            "com.fasterxml.jackson.databind.*",
+            "com.fasterxml.jackson.databind.annotation.*",
+        ];
+        const needsTypeReference = Array.from(t.getNonAttributeChildren()).some(
+            (item) =>
+                this.sourcelikeToString(this.javaType(true, item)).includes(
+                    "<",
+                ),
+        );
+        if (needsTypeReference) {
+            imports.push("com.fasterxml.jackson.core.type.*");
+        }
+
+        return [...imports, ...super.importsForTupleDefinition(t)];
+    }
+
+    protected emitTupleAttributes(t: TupleType, tupleName: Name): void {
+        this.emitLine(
+            "@JsonDeserialize(using = ",
+            tupleName,
+            ".Deserializer.class)",
+        );
+        this.emitLine(
+            "@JsonSerialize(using = ",
+            tupleName,
+            ".Serializer.class)",
+        );
+        super.emitTupleAttributes(t, tupleName);
+    }
+
+    // Jackson reads and writes a tuple's class as a JSON array.  Its
+    // `@JsonFormat(shape = ARRAY)` doesn't check the array's length (missing
+    // items stay null, extra ones are skipped, since the mapper doesn't
+    // fail on unknown properties), writes missing optional items as nulls
+    // and has no rest, so the class has its own (de)serializer.
+    protected emitTupleSerializer(t: TupleType, tupleName: Name): void {
+        const fields = this.tupleFields(t);
+        const fail = (verb: string, message: string): Sourcelike => [
+            `throw new IOException("Cannot ${verb} `,
+            tupleName,
+            `: ${message}");`,
+        ];
+        const failLength = fail(
+            "deserialize",
+            `expected ${expectedTupleLength(t)}`,
+        );
+
+        // Reads the value at the current token, which is the item's first
+        // one, then moves to the next item.  The token must be one the
+        // item's type starts with: Jackson would also read a number into a
+        // String, say, and a union trying its tuples in turn would then take
+        // the wrong one.
+        const emitRead = (
+            type: Type,
+            what: string,
+            assign: (read: Sourcelike) => Sourcelike,
+        ): void => {
+            const tokens = this.jsonTokensForType(type);
+            if (tokens !== undefined) {
+                this.emitBlock(
+                    [
+                        "if (",
+                        tokens === "not-null"
+                            ? "token == JsonToken.VALUE_NULL"
+                            : tokens
+                                  .map((token) => `token != JsonToken.${token}`)
+                                  .join(" && "),
+                        ")",
+                    ],
+                    () =>
+                        this.emitLine(
+                            'throw new IOException("Cannot deserialize ',
+                            tupleName,
+                            ': unexpected " + token + " for ',
+                            what,
+                            '");',
+                        ),
+                );
+            }
+
+            this.emitLine(assign(this.readValueAs("jsonParser", type)), ";");
+            this.emitLine("token = jsonParser.nextToken();");
+        };
+
+        const emitDeserialize = (): void => {
+            this.emitBlock(
+                "if (jsonParser.currentToken() != JsonToken.START_ARRAY)",
+                () => this.emitLine(failLength),
+            );
+            this.emitLine(tupleName, " value = new ", tupleName, "();");
+            this.emitLine("JsonToken token = jsonParser.nextToken();");
+            for (const field of fields) {
+                switch (field.kind) {
+                    case "required":
+                        this.emitBlock(
+                            "if (token == JsonToken.END_ARRAY)",
+                            () => this.emitLine(failLength),
+                        );
+                        emitRead(field.type, field.name, (read) => [
+                            "value.",
+                            field.name,
+                            " = ",
+                            read,
+                        ]);
+                        break;
+                    case "optional":
+                    case "optional-nullable":
+                        this.emitBlock(
+                            "if (token != JsonToken.END_ARRAY)",
+                            () =>
+                                emitRead(field.type, field.name, (read) => [
+                                    "value.",
+                                    field.name,
+                                    " = ",
+                                    field.kind === "optional"
+                                        ? read
+                                        : [
+                                              "java.util.Optional.ofNullable(",
+                                              read,
+                                              ")",
+                                          ],
+                                ]),
+                        );
+                        break;
+                    case "rest": {
+                        const elementType = this.javaType(true, field.type);
+                        const list = this._options.useList
+                            ? "value.rest"
+                            : "rest";
+                        this.emitLine(
+                            this._options.useList
+                                ? "value.rest"
+                                : ["java.util.List<", elementType, "> rest"],
+                            " = new java.util.ArrayList<",
+                            elementType,
+                            ">();",
+                        );
+                        this.emitBlock(
+                            "while (token != JsonToken.END_ARRAY)",
+                            () =>
+                                emitRead(
+                                    field.type,
+                                    "an item of the rest",
+                                    (read) => [list, ".add(", read, ")"],
+                                ),
+                        );
+                        if (!this._options.useList) {
+                            this.emitLine(
+                                "value.rest = ",
+                                this.newArray(field.type, "rest.size()"),
+                                ";",
+                            );
+                            this.emitBlock(
+                                "for (int i = 0; i < rest.size(); i++)",
+                                () =>
+                                    this.emitLine(
+                                        "value.rest[i] = rest.get(i);",
+                                    ),
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (t.rest === undefined) {
+                this.emitBlock("if (token != JsonToken.END_ARRAY)", () =>
+                    this.emitLine(failLength),
+                );
+            }
+
+            this.emitLine("return value;");
+        };
+
+        // The required items, the optional ones that are present, then the
+        // rest.  An item can't follow a missing one in JSON, so such a value
+        // is an error rather than written with the later items moved into
+        // the gap, or with nulls in it.
+        const emitSerialize = (): void => {
+            const gap = fail(
+                "serialize",
+                "an item follows a missing optional item",
+            );
+            this.emitLine("jsonGenerator.writeStartArray();");
+            let previousOptional: string | undefined;
+            for (const field of fields) {
+                switch (field.kind) {
+                    case "required":
+                        this.emitLine(
+                            "jsonGenerator.writeObject(obj.",
+                            field.name,
+                            ");",
+                        );
+                        break;
+                    case "optional":
+                    case "optional-nullable":
+                        this.emitBlock(
+                            ["if (obj.", field.name, " != null)"],
+                            () => {
+                                if (previousOptional !== undefined) {
+                                    this.emitBlock(
+                                        [
+                                            "if (obj.",
+                                            previousOptional,
+                                            " == null)",
+                                        ],
+                                        () => this.emitLine(gap),
+                                    );
+                                }
+
+                                this.emitLine(
+                                    "jsonGenerator.writeObject(obj.",
+                                    field.name,
+                                    field.kind === "optional"
+                                        ? ""
+                                        : ".orElse(null)",
+                                    ");",
+                                );
+                            },
+                        );
+                        previousOptional = field.name;
+                        break;
+                    case "rest":
+                        this.emitBlock("if (obj.rest != null)", () => {
+                            if (previousOptional !== undefined) {
+                                const isNotEmpty = this._options.useList
+                                    ? "!obj.rest.isEmpty()"
+                                    : "obj.rest.length > 0";
+                                this.emitBlock(
+                                    [
+                                        "if (",
+                                        isNotEmpty,
+                                        " && obj.",
+                                        previousOptional,
+                                        " == null)",
+                                    ],
+                                    () => this.emitLine(gap),
+                                );
+                            }
+
+                            const elementType = this._options.useList
+                                ? this.javaType(true, field.type)
+                                : this.javaType(false, field.type);
+                            this.emitBlock(
+                                ["for (", elementType, " item : obj.rest)"],
+                                () =>
+                                    this.emitLine(
+                                        "jsonGenerator.writeObject(item);",
+                                    ),
+                            );
+                        });
+                        break;
+                }
+            }
+
+            this.emitLine("jsonGenerator.writeEndArray();");
+        };
+
+        this.ensureBlankLine();
+        this.emitBlock(
+            [
+                "static class Deserializer extends JsonDeserializer<",
+                tupleName,
+                ">",
+            ],
+            () => {
+                this.emitLine("@Override");
+                this.emitBlock(
+                    [
+                        "public ",
+                        tupleName,
+                        " deserialize(JsonParser jsonParser, DeserializationContext deserializationContext) throws IOException, JsonProcessingException",
+                    ],
+                    emitDeserialize,
+                );
+            },
+        );
+        this.ensureBlankLine();
+        this.emitBlock(
+            ["static class Serializer extends JsonSerializer<", tupleName, ">"],
+            () => {
+                this.emitLine("@Override");
+                this.emitBlock(
+                    [
+                        "public void serialize(",
+                        tupleName,
+                        " obj, JsonGenerator jsonGenerator, SerializerProvider serializerProvider) throws IOException",
+                    ],
+                    emitSerialize,
+                );
+            },
+        );
+    }
+
+    /**
+     * The JSON tokens a value of type `t` can start with, or undefined for
+     * any.  A union checks its value itself, but Jackson doesn't pass it a
+     * JSON null, so it only must not be null unless it's nullable.
+     */
+    private jsonTokensForType(t: Type): string[] | "not-null" | undefined {
+        if (t instanceof UnionType) {
+            const nullable = nullableFromUnion(t);
+            if (nullable !== null) {
+                const tokens = this.jsonTokensForType(nullable);
+                return Array.isArray(tokens)
+                    ? [...tokens, "VALUE_NULL"]
+                    : undefined;
+            }
+
+            return t.isNullable ? undefined : "not-null";
+        }
+
+        switch (t.kind) {
+            case "any":
+                return undefined;
+            case "null":
+                return ["VALUE_NULL"];
+            case "bool":
+                return ["VALUE_TRUE", "VALUE_FALSE"];
+            case "integer":
+                return ["VALUE_NUMBER_INT"];
+            case "double":
+                return ["VALUE_NUMBER_INT", "VALUE_NUMBER_FLOAT"];
+            case "array":
+            case "tuple":
+                return ["START_ARRAY"];
+            case "class":
+            case "map":
+                return ["START_OBJECT"];
+            default:
+                // Strings, enums, dates and times, UUIDs.
+                return ["VALUE_STRING"];
+        }
+    }
+
+    /**
+     * `new T[size]` for an array of `t`s, with the size in the first
+     * dimension if `t` is an array itself.  The element type is written
+     * without its type arguments: Java can't create arrays of generic types.
+     */
+    private newArray(t: Type, size: string): Sourcelike {
+        let dimensions = "";
+        let element = t;
+        while (element instanceof ArrayType) {
+            dimensions += "[]";
+            element = element.items;
+        }
+
+        return [
+            "new ",
+            this.javaTypeWithoutGenerics(false, element),
+            "[",
+            size,
+            "]",
+            dimensions,
+        ];
     }
 
     protected emitUnionAttributes(_u: UnionType, unionName: Name): void {
@@ -306,6 +725,59 @@ export class JacksonRenderer extends JavaRenderer {
             });
         };
 
+        // A JSON array is the array member or one of the tuples.  With
+        // several of them, it's read into a tree, and they're tried in turn
+        // on the tree: those that take fewer lengths first.
+        const emitArrayDeserializer = (): void => {
+            const members = arraySortByInto(
+                Array.from(u.members).filter(
+                    (m) => m instanceof ArrayType || m instanceof TupleType,
+                ),
+                arrayMemberPriority,
+            );
+            if (members.length === 0) return;
+
+            this.indent(() => {
+                if (members.length === 1) {
+                    tokenCase("START_ARRAY");
+                    this.indent(() => {
+                        emitDeserializeType(members[0]);
+                        this.emitLine("break;");
+                    });
+                    return;
+                }
+
+                this.emitLine("case START_ARRAY: {");
+                this.indent(() => {
+                    this.emitLine(
+                        "TreeNode tree = jsonParser.readValueAsTree();",
+                    );
+                    members.forEach((m, i) => {
+                        const { fieldName } = this.unionField(u, m);
+                        const read = (): void => {
+                            this.emitLine(
+                                "value.",
+                                fieldName,
+                                " = ",
+                                this.readValueAs(
+                                    "tree.traverse(jsonParser.getCodec())",
+                                    m,
+                                ),
+                                ";",
+                            );
+                            this.emitLine("break;");
+                        };
+                        if (i < members.length - 1) {
+                            this.emitIgnoredTryCatchBlock(read);
+                        } else {
+                            read();
+                        }
+                    });
+                });
+                this.emitLine("}");
+            });
+        };
+
         const emitStringDeserializer = (): void => {
             const enumType = u.findMember("enum");
             const stringType = u.findMember("string");
@@ -463,7 +935,7 @@ export class JacksonRenderer extends JavaRenderer {
                         emitNumberDeserializer();
                         emitDeserializer(["VALUE_TRUE", "VALUE_FALSE"], "bool");
                         emitStringDeserializer();
-                        emitDeserializer(["START_ARRAY"], "array");
+                        emitArrayDeserializer();
                         emitDeserializer(["START_OBJECT"], "class");
                         emitDeserializer(["START_OBJECT"], "map");
                         this.indent(() =>

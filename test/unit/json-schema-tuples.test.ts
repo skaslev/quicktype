@@ -40,7 +40,7 @@ describe("targets without tuples", () => {
     // The tuple's array of the union of its items would contain itself
     // through arrays and unions only, which these renderers can't declare.
     test.each([
-        ["java", "List<Object>"],
+        ["ruby", "Types.Array(Types::Any)"],
     ] as const)("%s: a tuple's reference to itself becomes any", async (lang, expected) => {
         const output = await renderSchema(lang, {
             type: "object",
@@ -61,15 +61,13 @@ describe("targets without tuples", () => {
     });
 
     test("get an array of the union of the item types", async () => {
-        const output = await renderSchema("kotlin", pair, justTypes);
-        expect(output).toContain(
-            "typealias TopLevel = ArrayList<TopLevelElement>",
-        );
+        const output = await renderSchema("elixir", pair, justTypes);
+        expect(output).toContain("@type t :: [float() | String.t()]");
     });
 
     test("include draft-07 additionalItems in that union", async () => {
         const output = await renderSchema(
-            "kotlin",
+            "elixir",
             {
                 type: "array",
                 items: [{ type: "string" }],
@@ -77,7 +75,6 @@ describe("targets without tuples", () => {
             },
             justTypes,
         );
-        expect(output).toContain("IntegerValue(val value: Long)");
-        expect(output).toContain("StringValue(val value: String)");
+        expect(output).toContain("@type t :: [integer() | String.t()]");
     });
 });
