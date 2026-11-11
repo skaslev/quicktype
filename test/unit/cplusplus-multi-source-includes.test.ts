@@ -118,3 +118,51 @@ describe("C++ multi-source recursive unions", () => {
         expect(forwardDeclarations(source)).toEqual([]);
     });
 });
+
+describe("C++ multi-source nested unions", () => {
+    test("a union includes a union in its arrays", async () => {
+        // The shape of Redis' GEORADIUS reply without tuples.
+        const source = await header(
+            {
+                anyOf: [
+                    {
+                        type: "array",
+                        items: {
+                            anyOf: [
+                                { type: "string" },
+                                { type: "array", items: { type: "integer" } },
+                            ],
+                        },
+                    },
+                    { type: "integer" },
+                ],
+            },
+            "TopLevel.hpp",
+        );
+        expect(source).toContain(
+            "using TopLevel = std::variant<std::vector<TopLevelElement>, int64_t>;",
+        );
+        expect(includedHeaders(source)).toContain("TopLevelElement");
+    });
+
+    test("a union includes a union in its maps", async () => {
+        const source = await header(
+            {
+                anyOf: [
+                    { type: "integer" },
+                    {
+                        type: "object",
+                        additionalProperties: {
+                            anyOf: [{ type: "string" }, leaf],
+                        },
+                    },
+                ],
+            },
+            "TopLevel.hpp",
+        );
+        expect(source).toContain(
+            "using TopLevel = std::variant<int64_t, std::map<std::string, TopLevelValue>>;",
+        );
+        expect(includedHeaders(source)).toContain("TopLevelValue");
+    });
+});

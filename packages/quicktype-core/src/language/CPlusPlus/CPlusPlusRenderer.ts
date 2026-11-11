@@ -986,8 +986,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                  * we can safely include it as-is.
                  * HOWEVER if we define a union on its own, we must recurse into the
                  * typedefinition and include all subtypes.
+                 * A named union in that definition, in an array or a map, must be
+                 * included too: it's an alias, which can't be forward declared.
                  */
-                if (this.unionNeedsName(t) && isClassMember) {
+                if (this.unionNeedsName(t) && (isClassMember || l > 0)) {
                     /**
                      * This is NOT ENOUGH.
                      * We have a variant member in a class, e.g. defined with a boost::variant.
