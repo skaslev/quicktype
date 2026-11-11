@@ -341,6 +341,20 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         return this.optionalTypeHeap();
     }
 
+    // Whether the code holds values in an optional or a shared_ptr, which
+    // nlohmann/json converts with the optional helpers: optional properties,
+    // nullable types (unions with null), and the forward-declared types,
+    // which are held in shared_ptrs even where they're required.
+    private get haveOptionals(): boolean {
+        return (
+            this.haveUnions ||
+            this.haveOptionalProperties ||
+            iterableSome(this.typeGraph.allTypesUnordered(), (t) =>
+                this.isForwardDeclaredType(t),
+            )
+        );
+    }
+
     // Returns a label that can be used to distinguish between
     // heap and stack based optional handling methods
     private optionalTypeLabel(t: Type): string {
@@ -584,12 +598,17 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitLine("#pragma once");
         this.ensureBlankLine();
 
+        // With getters and setters, emitExtraIncludes includes the optional
+        // header anyway.
         if (
             this.haveOptionalProperties ||
             (!this._options.codeFormat &&
                 iterableSome(this.namedUnions, (u) =>
                     this.recursiveUnionUsesStackOptional(u),
-                ))
+                )) ||
+            (!this._options.codeFormat &&
+                !this._options.justTypes &&
+                this.haveOptionals)
         ) {
             if (this._options.boost) {
                 this.emitInclude(true, "boost/optional.hpp");
@@ -3155,7 +3174,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             this.emitHelperFunctions();
         });
 
-        if (this.haveUnions || this.haveOptionalProperties) {
+        if (this.haveOptionals) {
             this.ensureBlankLine();
             this.emitOptionalHelpers();
         }
@@ -3325,11 +3344,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         if (this._options.justTypes) {
             this.emitTypes();
         } else {
-            if (
-                !this._options.justTypes &&
-                this.haveNamedTypes &&
-                (this.haveUnions || this.haveOptionalProperties)
-            ) {
+            if (this.haveOptionals) {
                 this.emitOptionalHelpers();
                 this.ensureBlankLine();
             }
