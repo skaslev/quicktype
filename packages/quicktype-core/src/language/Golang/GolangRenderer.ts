@@ -291,7 +291,6 @@ export class GoRenderer extends ConvenienceRenderer {
     private emitClass(c: ClassType, className: Name): void {
         this.startFile(className);
         const columns: Sourcelike[][] = [];
-        const usedTypes = new Set<string>();
         this.forEachClassProperty(c, "none", (name, jsonName, p) => {
             const description = this.descriptionForClassProperty(c, jsonName);
             const docStrings =
@@ -315,17 +314,9 @@ export class GoRenderer extends ConvenienceRenderer {
                 [goType, " "],
                 ["`", tags, "`"],
             ]);
-            usedTypes.add(goType.toString());
         });
 
-        this.emitPackageDefinitons(
-            false,
-            usedTypes.has("time.Time") ||
-                usedTypes.has("*,time.Time") ||
-                usedTypes.has("[],time.Time")
-                ? new Set<string>(["time"])
-                : undefined,
-        );
+        this.emitPackageDefinitons(false, this.collectClassImports(c));
         this.emitDescription(this.descriptionForType(c));
         this.emitStruct(className, columns);
         this.endFile();
@@ -748,47 +739,29 @@ func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, 
     }
 
     private collectClassImports(c: ClassType): Set<string> {
-        const usedTypes = new Set<string>();
-        const mapping: Map<string, string> = new Map();
-        mapping.set("time.Time", "time");
-        mapping.set("*,time.Time", "time");
-        mapping.set("[],time.Time", "time");
-
+        const goTypes: Sourcelike[] = [];
         this.forEachClassProperty(c, "none", (_name, _jsonName, p) => {
-            const goType = this.propertyGoType(p);
-            usedTypes.add(goType.toString());
+            goTypes.push(this.propertyGoType(p));
         });
-
-        const imports = new Set<string>();
-        usedTypes.forEach((k) => {
-            const typeImport = mapping.get(k);
-            if (typeImport) {
-                imports.add(typeImport);
-            }
-        });
-
-        return imports;
+        return this.collectGoTypeImports(goTypes);
     }
 
     private collectUnionImports(u: UnionType): Set<string> {
-        const usedTypes = new Set<string>();
-        const mapping: Map<string, string> = new Map();
-        mapping.set("time.Time", "time");
-        mapping.set("*,time.Time", "time");
-
+        const goTypes: Sourcelike[] = [];
         this.forEachUnionMember(u, null, "none", null, (_fieldName, t) => {
-            const goType = this.nullableGoType(t, true);
-            usedTypes.add(goType.toString());
+            goTypes.push(this.nullableGoType(t, true));
         });
+        return this.collectGoTypeImports(goTypes);
+    }
 
+    // The packages the Go types refer to: `time` for `time.Time`, also in
+    // slices, maps and pointers, such as `map[string][]*time.Time`.
+    private collectGoTypeImports(goTypes: readonly Sourcelike[]): Set<string> {
         const imports = new Set<string>();
-        for (const k of usedTypes) {
-            const typeImport = mapping.get(k);
-            if (!typeImport) {
-                continue;
+        for (const goType of goTypes) {
+            if (this.sourcelikeToString(goType).includes("time.Time")) {
+                imports.add("time");
             }
-
-            imports.add(typeImport);
         }
 
         return imports;
