@@ -1126,7 +1126,13 @@ export class JSONPythonRenderer extends PythonRenderer {
                         " = ",
                         makeValue(this.deserializer(property, cp.type)),
                     );
-                    args.push(name);
+                    // A pydantic model takes its fields as keyword
+                    // arguments only.
+                    args.push(
+                        this.pyOptions.pydanticBaseModel
+                            ? [name, "=", name]
+                            : name,
+                    );
                     {
                         const [min, max] = minMaxItemsForType(cp.type) ?? [];
                         const check = (condition: Sourcelike): void =>
