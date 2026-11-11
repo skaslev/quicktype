@@ -1600,13 +1600,17 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                                 stringEscape(json),
                             ]),
                         );
+                        // An optional property may be absent.
+                        const present = p.isOptional
+                            ? `j.find(${key}) != j.end() && `
+                            : "";
                         if (minItems !== undefined)
                             this.emitLine(
-                                `if (j.at(${key}).size() < ${minItems}) throw std::runtime_error("Too few items");`,
+                                `if (${present}j.at(${key}).size() < ${minItems}) throw std::runtime_error("Too few items");`,
                             );
                         if (maxItems !== undefined)
                             this.emitLine(
-                                `if (j.at(${key}).size() > ${maxItems}) throw std::runtime_error("Too many items");`,
+                                `if (${present}j.at(${key}).size() > ${maxItems}) throw std::runtime_error("Too many items");`,
                             );
                     }
 
