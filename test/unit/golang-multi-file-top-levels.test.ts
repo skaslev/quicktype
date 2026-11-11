@@ -1,7 +1,9 @@
 // In Go's multi-file output, a top-level that is a class, enum or union is
 // in its type's file, which is written once: the top-level's comments, the
 // package and all imports, the top-level's functions, then the type.  The
-// just-types modes finish the files of top-level aliases and unions, too.
+// just-types modes finish the files of top-level aliases and unions, too,
+// and the file of an enum in a union, which has no methods, doesn't import
+// encoding/json.
 
 import { InputData, JSONSchemaInput, quicktypeMultiFile } from "quicktype-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -135,4 +137,24 @@ describe("Go multi-file top-levels", () => {
             expect(files.get("B.go")).toContain("type B struct {");
         });
     }
+
+    test("an enum in a union imports no encoding/json", async () => {
+        const files = await renderFiles({
+            type: "object",
+            properties: {
+                choice: {
+                    oneOf: [{ enum: ["a", "b"] }, { type: "integer" }],
+                },
+                plain: { enum: ["c", "d"] },
+            },
+            required: ["choice", "plain"],
+        });
+        const choice = files.get("ChoiceEnum.go") ?? "";
+        expect(choice).toContain("type ChoiceEnum string");
+        expect(choice).not.toContain("UnmarshalJSON");
+        expect(choice).not.toContain("encoding/json");
+        const plain = files.get("Plain.go") ?? "";
+        expect(plain).toContain("func (x *Plain) UnmarshalJSON(");
+        expect(plain).toContain('import "encoding/json"');
+    });
 });

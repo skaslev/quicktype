@@ -375,8 +375,17 @@ export class GoRenderer extends ConvenienceRenderer {
     }
 
     private emitEnum(e: EnumType, enumName: Name): void {
+        // An enum in a union has no methods, so its file in multi-file
+        // output needs no encoding/json.
+        const allTypes = Array.from(this.typeGraph.allTypesUnordered());
+        const inUnion = allTypes.some(
+            (t) =>
+                t instanceof UnionType &&
+                nullableFromUnion(t) === null &&
+                t.getChildren().has(e),
+        );
         this.startFile(enumName);
-        this.emitPackageDefinitons(true);
+        this.emitPackageDefinitons(!inUnion);
         this.emitDescription(this.descriptionForType(e));
         this.emitLine("type ", enumName, " string");
         this.ensureBlankLine();
@@ -393,15 +402,7 @@ export class GoRenderer extends ConvenienceRenderer {
         this.indent(() => this.emitTable(columns));
         this.emitLine(")");
         const type = this.sourcelikeToString(enumName);
-        const allTypes = Array.from(this.typeGraph.allTypesUnordered());
-        if (
-            allTypes.some(
-                (t) =>
-                    t instanceof UnionType &&
-                    nullableFromUnion(t) === null &&
-                    t.getChildren().has(e),
-            )
-        ) {
+        if (inUnion) {
             this.endFile();
             return;
         }
