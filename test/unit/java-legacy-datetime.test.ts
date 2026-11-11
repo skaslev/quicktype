@@ -110,3 +110,37 @@ test("the fraction of a second is read as milliseconds", async () => {
         ].join("\n"),
     );
 });
+
+// SimpleDateFormat's X reads only the hours of an offset ("+05:30" was read
+// as +05:00), and Z, which the time formats had, reads neither "Z" nor
+// "+02:00", so a time's offset was ignored.  The formats take XXX ("Z" or
+// "+hh:mm"), and "+hhmm" and "+hh" are written that way before parsing.
+test("time zone offsets are read with their minutes", async () => {
+    const converter = file(
+        await renderJava(withUnion("date-time")),
+        "Converter.java",
+    );
+    const formats = converter.match(/DATE_TIME_FORMATS = \{\n([^}]*)\};/)?.[1];
+    expect(formats?.match(/"[^"]*"/g)).toEqual([
+        "\"yyyy-MM-dd'T'HH:mm:ss.SXXX\"",
+        "\"yyyy-MM-dd'T'HH:mm:ss.S\"",
+        "\"yyyy-MM-dd'T'HH:mm:ssXXX\"",
+        "\"yyyy-MM-dd'T'HH:mm:ss\"",
+        '"yyyy-MM-dd HH:mm:ss.SXXX"',
+        '"yyyy-MM-dd HH:mm:ss.S"',
+        '"yyyy-MM-dd HH:mm:ssXXX"',
+        '"yyyy-MM-dd HH:mm:ss"',
+        '"HH:mm:ss.SXXX"',
+        '"HH:mm:ss.S"',
+        '"HH:mm:ssXXX"',
+        '"HH:mm:ss"',
+        '"yyyy-MM-dd"',
+    ]);
+    expect(converter).toContain(
+        [
+            '        str = str.replaceFirst("(:\\\\d{2}(\\\\.\\\\d+)?[+-]\\\\d{2}):?(\\\\d{2})$", "$1:$3");',
+            '        str = str.replaceFirst("(:\\\\d{2}(\\\\.\\\\d+)?[+-]\\\\d{2})$", "$1:00");',
+            "        for (String format : DATE_TIME_FORMATS) {",
+        ].join("\n"),
+    );
+});

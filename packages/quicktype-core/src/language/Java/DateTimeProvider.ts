@@ -245,17 +245,17 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
         );
         this._renderer.indent(() =>
             this._renderer.indent(() => {
-                this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ss.SX\",");
+                this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ss.SXXX\",");
                 this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ss.S\",");
-                this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ssX\",");
+                this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ssXXX\",");
                 this._renderer.emitLine("\"yyyy-MM-dd'T'HH:mm:ss\",");
-                this._renderer.emitLine('"yyyy-MM-dd HH:mm:ss.SX",');
+                this._renderer.emitLine('"yyyy-MM-dd HH:mm:ss.SXXX",');
                 this._renderer.emitLine('"yyyy-MM-dd HH:mm:ss.S",');
-                this._renderer.emitLine('"yyyy-MM-dd HH:mm:ssX",');
+                this._renderer.emitLine('"yyyy-MM-dd HH:mm:ssXXX",');
                 this._renderer.emitLine('"yyyy-MM-dd HH:mm:ss",');
-                this._renderer.emitLine('"HH:mm:ss.SZ",');
+                this._renderer.emitLine('"HH:mm:ss.SXXX",');
                 this._renderer.emitLine('"HH:mm:ss.S",');
-                this._renderer.emitLine('"HH:mm:ssZ",');
+                this._renderer.emitLine('"HH:mm:ssXXX",');
                 this._renderer.emitLine('"HH:mm:ss",');
                 this._renderer.emitLine('"yyyy-MM-dd",');
             }),
@@ -279,6 +279,14 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
                         "str = str.substring(0, fraction.start(1)) + millis + str.substring(fraction.end(1));",
                     );
                 });
+                // The formats' XXX reads a time zone only as "Z" or
+                // "+hh:mm": write "+hhmm" and "+hh" that way.
+                this._renderer.emitLine(
+                    'str = str.replaceFirst("(:\\\\d{2}(\\\\.\\\\d+)?[+-]\\\\d{2}):?(\\\\d{2})$", "$1:$3");',
+                );
+                this._renderer.emitLine(
+                    'str = str.replaceFirst("(:\\\\d{2}(\\\\.\\\\d+)?[+-]\\\\d{2})$", "$1:00");',
+                );
                 this._renderer.emitBlock(
                     "for (String format : DATE_TIME_FORMATS)",
                     () => {
