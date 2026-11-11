@@ -198,3 +198,54 @@ describe("pydantic's names", () => {
         expect(output).toContain('Field(default=None, alias="Field")');
     });
 });
+
+describe("BaseModel attributes", () => {
+    const shadowing = {
+        type: "object",
+        properties: {
+            $schema: { type: "string" },
+            copy: { type: "string" },
+            json: { type: "integer" },
+            model_config: { type: "integer" },
+            register: { type: "integer" },
+            fields: { type: "integer" },
+        },
+        required: ["copy"],
+    };
+
+    // pydantic 1 rejects a field that shadows a BaseModel attribute, and
+    // pydantic 2 warns (or rejects `model_config`).
+    test("pydantic fields don't shadow BaseModel attributes", async () => {
+        const output = await renderSchema(shadowing, {
+            ...pydantic,
+            "just-types": true,
+        });
+        expect(output).toContain('top_level_copy: str = Field(alias="copy")');
+        expect(output).toContain(
+            'top_level_schema: str | None = Field(default=None, alias="$schema")',
+        );
+        expect(output).toContain(
+            'top_level_json: int | None = Field(default=None, alias="json")',
+        );
+        expect(output).toContain(
+            'top_level_model_config: int | None = Field(default=None, alias="model_config")',
+        );
+        expect(output).toContain(
+            'top_level_register: int | None = Field(default=None, alias="register")',
+        );
+        expect(output).toContain("fields: int | None = None");
+    });
+
+    test("from_dict passes them under their aliases", async () => {
+        const output = await renderSchema(shadowing, pydantic);
+        expect(output).toContain(
+            'return TopLevel(copy=top_level_copy, fields=fields, json=top_level_json, model_config=top_level_model_config, register=top_level_register, **cast(dict[str, Any], {"$schema": top_level_schema}))',
+        );
+    });
+
+    test("other classes keep those names", async () => {
+        const output = await renderSchema(shadowing, { "just-types": true });
+        expect(output).toContain("copy: str");
+        expect(output).toContain("schema: str | None = None");
+    });
+});

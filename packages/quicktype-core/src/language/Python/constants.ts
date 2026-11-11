@@ -60,3 +60,41 @@ export const forbiddenPropertyNames = [
     "with",
     "yield",
 ] as const;
+
+// The attributes of pydantic 1 and 2's BaseModel (with `mro` and `register`
+// of its metaclass), which fields mustn't shadow: pydantic 1 rejects such
+// a model (NameError), pydantic 2 warns (or rejects it, for `model_config`,
+// `model_dump` and `model_validate`), and mypy rejects the override.
+export const pydanticBaseModelAttributes = [
+    "Config",
+    "construct",
+    "copy",
+    "dict",
+    "from_orm",
+    "json",
+    "model_computed_fields",
+    "model_config",
+    "model_construct",
+    "model_copy",
+    "model_dump",
+    "model_dump_json",
+    "model_extra",
+    "model_fields",
+    "model_fields_set",
+    "model_json_schema",
+    "model_parametrized_name",
+    "model_post_init",
+    "model_rebuild",
+    "model_validate",
+    "model_validate_json",
+    "model_validate_strings",
+    "mro",
+    "parse_file",
+    "parse_obj",
+    "parse_raw",
+    "register",
+    "schema",
+    "schema_json",
+    "update_forward_refs",
+    "validate",
+] as const;

@@ -30,7 +30,11 @@ import {
 } from "../../Type/index.js";
 import { matchType, removeNullFromUnion } from "../../Type/TypeUtils.js";
 
-import { forbiddenPropertyNames, forbiddenTypeNames } from "./constants.js";
+import {
+    forbiddenPropertyNames,
+    forbiddenTypeNames,
+    pydanticBaseModelAttributes,
+} from "./constants.js";
 import type { pythonOptions } from "./language.js";
 import { classNameStyle, snakeNameStyle } from "./utils.js";
 
@@ -62,11 +66,15 @@ export class PythonRenderer extends ConvenienceRenderer {
         _: ClassType,
         _classNamed: Name,
     ): ForbiddenWordsInfo {
-        const names: string[] = [...forbiddenPropertyNames];
-        // A field with a default binds its name in the class body, where
-        // the fields after it may call `Field`.
-        if (this.pyOptions.pydanticBaseModel) names.push("Field");
-        return { names, includeGlobalForbidden: false };
+        const names = new Set<string>(forbiddenPropertyNames);
+        if (this.pyOptions.pydanticBaseModel) {
+            for (const name of pydanticBaseModelAttributes) names.add(name);
+            // A field with a default binds its name in the class body,
+            // where the fields after it may call `Field`.
+            names.add("Field");
+        }
+
+        return { names: Array.from(names), includeGlobalForbidden: false };
     }
 
     protected makeNamedTypeNamer(): Namer {
