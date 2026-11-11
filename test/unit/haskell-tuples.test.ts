@@ -1,6 +1,6 @@
 // aeson (de)serializes Haskell tuples as JSON arrays of exactly their
-// length, so Haskell keeps fixed-length tuples.  Other tuple shapes stay
-// arrays of a union.
+// length, so Haskell keeps fixed-length tuples.  Other tuple shapes are data
+// types with instances of their own, see haskell-tuple-rest.test.ts.
 
 import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
 import { expect, test } from "vitest";
@@ -40,13 +40,13 @@ test.each([
     ],
     ["a top-level tuple", pair, "type TopLevel = (Text, Double)"],
     [
-        "rest elements become an array",
+        "rest elements become a data type",
         {
             type: "array",
             prefixItems: [{ type: "string" }],
             items: { type: "integer" },
         },
-        "type TopLevel = [TopLevelElement]",
+        "data TopLevel = TopLevel Text ([Int])",
     ],
 ] as const)("%s", async (_, schema, expected) => {
     expect(await renderSchema(schema)).toContain(expected);

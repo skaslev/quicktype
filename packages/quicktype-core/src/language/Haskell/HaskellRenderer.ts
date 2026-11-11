@@ -45,6 +45,30 @@ const valueKindCount = 6;
 // aeson has instances for tuples of up to 15 elements, as has Show.
 const maxTupleLength = 15;
 
+// How many array lengths a tuple accepts.
+function acceptedLengths(t: TupleType): number {
+    return t.rest === undefined
+        ? t.items.length - t.minItems + 1
+        : Number.POSITIVE_INFINITY;
+}
+
+function elements(n: number): string {
+    return n === 1 ? "1 element" : `${n} elements`;
+}
+
+// What a tuple with optional items or a rest expects, for error messages.
+function expectedTupleLength(t: TupleType): string {
+    const min = t.minItems;
+    const max = t.items.length;
+    if (t.rest !== undefined) {
+        return min === 0 ? "an array" : `an array of at least ${elements(min)}`;
+    }
+
+    return min === 0
+        ? `an array of at most ${elements(max)}`
+        : `an array of ${min} to ${max} elements`;
+}
+
 export class HaskellRenderer extends ConvenienceRenderer {
     public constructor(
         targetLanguage: TargetLanguage,
@@ -151,22 +175,7 @@ export class HaskellRenderer extends ConvenienceRenderer {
             (_integerType) => singleWord("Int"),
             (_doubleType) => singleWord("Double"),
             (_stringType) => singleWord("Text"),
-            (arrayType) => {
-                if (this._options.useList) {
-                    return multiWord(
-                        "",
-                        "[",
-                        parenIfNeeded(this.haskellType(arrayType.items)),
-                        "]",
-                    );
-                }
-
-                return multiWord(
-                    " ",
-                    "Vector",
-                    parenIfNeeded(this.haskellType(arrayType.items)),
-                );
-            },
+            (arrayType) => this.haskellArray(arrayType.items),
             (classType) => singleWord(this.nameForNamedType(classType)),
             (mapType) =>
                 multiWord(
@@ -193,6 +202,19 @@ export class HaskellRenderer extends ConvenienceRenderer {
         );
     }
 
+    private haskellArray(items: Type): MultiWord {
+        if (this._options.useList) {
+            return multiWord(
+                "",
+                "[",
+                parenIfNeeded(this.haskellType(items)),
+                "]",
+            );
+        }
+
+        return multiWord(" ", "Vector", parenIfNeeded(this.haskellType(items)));
+    }
+
     // Tuples are spelled out, `(A, B)`, unless the schema names them or
     // they can't be a type synonym of a Haskell tuple.
     protected tupleNeedsName(t: TupleType): boolean {
@@ -201,17 +223,20 @@ export class HaskellRenderer extends ConvenienceRenderer {
 
     /**
      * Whether a tuple is declared as a data type with JSON instances of its
-     * own instead of a type synonym: Haskell has no one-element tuple (and
-     * aeson encodes `Solo a` as just `a`), longer tuples than
-     * `maxTupleLength` have no instances, and a type synonym can't refer to
-     * itself, other than through a data type.
+     * own instead of a type synonym: a Haskell tuple has exactly one
+     * element per item, so a tuple with optional items or a rest can't be
+     * one, Haskell has no one-element tuple (and aeson encodes `Solo a` as
+     * just `a`), longer tuples than `maxTupleLength` have no instances, and
+     * a type synonym can't refer to itself, other than through a data type.
      */
     private tupleIsData(t: TupleType): boolean {
         const isData = (c: Type): boolean =>
             ["class", "enum"].includes(c.kind) ||
             (c instanceof UnionType && this.unionNeedsName(c)) ||
             (c instanceof TupleType &&
-                (c.items.length === 1 || c.items.length > maxTupleLength));
+                (!c.isFixedLength ||
+                    c.items.length === 1 ||
+                    c.items.length > maxTupleLength));
         return isData(t) || this.isInCycleThrough(t, (c) => !isData(c));
     }
 
@@ -355,15 +380,24 @@ export class HaskellRenderer extends ConvenienceRenderer {
             return;
         }
 
+        // A field per item, a `Maybe` for each optional one, and a final
+        // array (a list or a `Vector`) for the rest: `[A, B?, ...C[]]` is
+        // `T A (Maybe B) [C]`.  An optional item of a nullable type is a
+        // `Maybe (Maybe A)`, which keeps a missing item apart from a null
+        // one.
+        const fields = t.items.map((item, i) => {
+            const field = this.haskellType(item);
+            return i < t.minItems
+                ? field
+                : multiWord(" ", "Maybe", parenIfNeeded(field));
+        });
+        if (t.rest !== undefined) fields.push(this.haskellArray(t.rest));
         this.emitLine(
-            t.items.length === 1 ? "newtype " : "data ",
+            fields.length === 1 ? "newtype " : "data ",
             tupleName,
             " = ",
             tupleName,
-            ...t.items.map((item) => [
-                " ",
-                parenIfNeeded(this.haskellType(item)),
-            ]),
+            ...fields.map((field) => [" ", parenIfNeeded(field)]),
         );
         this.indent(() => this.emitLine("deriving (Show)"));
     }
@@ -526,14 +560,17 @@ export class HaskellRenderer extends ConvenienceRenderer {
      * tuple and another one of them.  They're tried in turn, tuples first.
      */
     private arrayMembersTriedInTurn(u: UnionType): Name[] {
-        const tuples: Name[] = [];
+        const tuples: Array<[Name, number]> = [];
         const arrays: Name[] = [];
         this.forEachUnionMember(u, null, "none", null, (name, t) => {
-            if (t instanceof TupleType) tuples.push(name);
-            else if (t.kind === "array") arrays.push(name);
+            if (t instanceof TupleType) {
+                tuples.push([name, acceptedLengths(t)]);
+            } else if (t.kind === "array") arrays.push(name);
         });
+        // Those that accept fewer lengths first.
+        tuples.sort(([, a], [, b]) => a - b);
         return tuples.length > 0 && tuples.length + arrays.length > 1
-            ? [...tuples, ...arrays]
+            ? [...tuples.map(([name]) => name), ...arrays]
             : [];
     }
 
@@ -598,6 +635,10 @@ export class HaskellRenderer extends ConvenienceRenderer {
     // The JSON of a tuple's data type is an array of its fields.
     private emitTupleFunctions(t: TupleType, tupleName: Name): void {
         if (!this.tupleIsData(t)) return;
+        if (!t.isFixedLength) {
+            this.emitVariableLengthTupleFunctions(t, tupleName);
+            return;
+        }
 
         const fields = t.items.map((_, i) => `x${i}`);
         this.emitLine("instance ToJSON ", tupleName, " where");
@@ -630,6 +671,150 @@ export class HaskellRenderer extends ConvenienceRenderer {
                     this.emitLine(
                         `_ -> fail "expected an array of length ${fields.length}"`,
                     );
+                });
+            });
+        });
+    }
+
+    /**
+     * The required items, the optional ones that are present, then the
+     * rest.  An item after a missing optional one is an error, as JSON
+     * can't leave a gap.  Reading checks the array's length and parses each
+     * element as its item's type, so that a null is only accepted where the
+     * item is nullable.
+     */
+    private emitVariableLengthTupleFunctions(
+        t: TupleType,
+        tupleName: Name,
+    ): void {
+        const items = t.items.map((_, i) => `x${i}`);
+        const hasRest = t.rest !== undefined;
+        const fields = hasRest ? [...items, "rest"] : items;
+        const restList = this._options.useList
+            ? "rest"
+            : "(Data.Vector.toList rest)";
+        const toJSONList = (values: string[], withRest: boolean): string => {
+            const list =
+                values.length === 0
+                    ? "([] :: [Value])"
+                    : `[${values.map((x) => `toJSON ${x}`).join(", ")}]`;
+            return withRest
+                ? `toJSON (${list} ++ map toJSON ${restList})`
+                : `toJSON ${list}`;
+        };
+
+        const required = items.slice(0, t.minItems);
+        const optional = items.slice(t.minItems);
+        this.emitLine("instance ToJSON ", tupleName, " where");
+        this.indent(() => {
+            const lhs = [
+                "toJSON (",
+                tupleName,
+                ...fields.map((x) => ` ${x}`),
+                ") =",
+            ];
+            if (optional.length === 0) {
+                this.emitLine(lhs, " ", toJSONList(required, true));
+                return;
+            }
+
+            const scrutinee =
+                optional.length === 1
+                    ? optional[0]
+                    : `(${optional.join(", ")})`;
+            this.emitLine(lhs, " case ", scrutinee, " of");
+            this.indent(() => {
+                for (let present = 0; present <= optional.length; present++) {
+                    const patterns = optional.map((_, i) =>
+                        i < present ? `Just y${t.minItems + i}` : "Nothing",
+                    );
+                    const pattern =
+                        patterns.length === 1
+                            ? patterns[0]
+                            : `(${patterns.join(", ")})`;
+                    const all = present === optional.length;
+                    this.emitLine(
+                        pattern,
+                        hasRest && !all ? " | null rest" : "",
+                        " -> ",
+                        toJSONList(
+                            [
+                                ...required,
+                                ...optional
+                                    .slice(0, present)
+                                    .map((_, i) => `y${t.minItems + i}`),
+                            ],
+                            hasRest && all,
+                        ),
+                    );
+                }
+
+                if (optional.length > 1 || hasRest) {
+                    this.emitLine(
+                        '_ -> error "',
+                        tupleName,
+                        ': an item follows a missing optional item"',
+                    );
+                }
+            });
+        });
+        this.ensureBlankLine();
+        this.emitLine("instance FromJSON ", tupleName, " where");
+        this.indent(() => {
+            this.emitLine("parseJSON v = do");
+            this.indent(() => {
+                this.emitLine("xs <- parseJSON v");
+                this.emitLine("case xs of");
+                this.indent(() => {
+                    for (
+                        let present = 0;
+                        present <= optional.length;
+                        present++
+                    ) {
+                        const elementNames = items.slice(
+                            0,
+                            t.minItems + present,
+                        );
+                        const all = present === optional.length;
+                        const pattern =
+                            hasRest && all
+                                ? `(${[...elementNames, "rest"].join(" : ")})`
+                                : `[${elementNames.join(", ")}]`;
+                        const parsed = items.map((x, i) =>
+                            i < t.minItems
+                                ? `parseJSON ${x}`
+                                : i < t.minItems + present
+                                  ? `(Just <$> parseJSON ${x})`
+                                  : "pure Nothing",
+                        );
+                        if (hasRest) {
+                            parsed.push(
+                                !all
+                                    ? "pure mempty"
+                                    : this._options.useList
+                                      ? "mapM parseJSON rest"
+                                      : "(Data.Vector.fromList <$> mapM parseJSON rest)",
+                            );
+                        }
+
+                        this.emitLine(
+                            pattern,
+                            " -> ",
+                            tupleName,
+                            " <$> ",
+                            parsed.join(" <*> "),
+                        );
+                    }
+
+                    // Without a rest, longer arrays are wrong; with one,
+                    // only arrays shorter than the required items.
+                    if (!hasRest || t.minItems > 0) {
+                        this.emitLine(
+                            '_ -> fail "',
+                            tupleName,
+                            `: expected ${expectedTupleLength(t)}"`,
+                        );
+                    }
                 });
             });
         });
@@ -690,6 +875,14 @@ import Data.Text (Text)`);
                 // this.emitLine("import List (map)");
             } else {
                 this.emitLine("import Data.Vector (Vector)");
+                // For the rests of tuples.
+                if (
+                    Array.from(this.typeGraph.allTypesUnordered()).some(
+                        (t) => t instanceof TupleType && t.rest !== undefined,
+                    )
+                ) {
+                    this.emitLine("import qualified Data.Vector");
+                }
             }
         } else {
             // Just types: the module and the imports its types use.

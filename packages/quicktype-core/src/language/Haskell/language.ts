@@ -55,9 +55,11 @@ export class HaskellTargetLanguage extends TargetLanguage<
         return true;
     }
 
-    // aeson (de)serializes tuples as arrays of exactly their length.
+    // aeson (de)serializes tuples as arrays of exactly their length;
+    // tuples with optional items or a rest are data types with instances of
+    // their own.
     public get tupleSupport(): TupleSupport {
-        return "fixed";
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "haskell">(
