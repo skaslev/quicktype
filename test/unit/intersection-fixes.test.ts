@@ -81,3 +81,51 @@ describe("an intersection of types without values in common", () => {
         expect(output).toContain("type TopLevel = unknown;");
     });
 });
+
+describe("an intersection of arrays", () => {
+    const strings = { type: "array", items: { type: "string" } };
+
+    test("keeps the items of the first array", async () => {
+        const output = await renderTypeScript({
+            allOf: [strings, { type: "array" }],
+        });
+        expect(output).toContain("export type TopLevel = string[];");
+    });
+
+    test("intersects the items of all arrays", async () => {
+        const output = await renderTypeScript({
+            allOf: [
+                strings,
+                {
+                    type: "array",
+                    items: { type: ["string", "integer"] },
+                },
+            ],
+        });
+        expect(output).toContain("export type TopLevel = string[];");
+    });
+
+    test("intersects items that are objects", async () => {
+        const output = await renderTypeScript({
+            allOf: [
+                {
+                    type: "array",
+                    items: object({ a: { type: "string" } }, ["a"]),
+                },
+                {
+                    type: "array",
+                    items: object({ b: { type: "integer" } }, ["b"]),
+                },
+            ],
+        });
+        expect(output).toContain("    a: string;");
+        expect(output).toContain("    b: number;");
+    });
+
+    test("of items without values in common has items of any type", async () => {
+        const output = await renderTypeScript({
+            allOf: [strings, { type: "array", items: { type: "integer" } }],
+        });
+        expect(output).toContain("export type TopLevel = unknown[];");
+    });
+});
