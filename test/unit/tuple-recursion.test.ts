@@ -77,7 +77,6 @@ describe("targets that declare recursive unions", () => {
     // The node's items are a string or an array of leaves and nodes: two
     // unions that contain each other through arrays.
     test.each([
-        ["csharp", ["public Leaf? Leaf;", "public TopLevelNode[]? "]],
         ["pike", ["typedef Leaf|array(TopLevelNode) PurpleNode;"]],
         // Unions are `dynamic` and `id`, but the leaves' class is declared.
         ["dart", ["class Leaf {"]],
@@ -91,7 +90,6 @@ describe("targets that declare recursive unions", () => {
     });
 
     test.each([
-        ["csharp", /public TopLevelElement\[\]\? \w+;/],
         ["pike", /typedef string\|array\(TopLevelElement\) TopLevelElement;/],
     ] as const)("%s keeps a tuple that is its own item", async (lang, expected) => {
         const output = await renderSchema(lang, chain, justTypes);

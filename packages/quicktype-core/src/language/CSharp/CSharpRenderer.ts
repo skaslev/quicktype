@@ -1,4 +1,8 @@
-import { arrayIntercalate } from "collection-utils";
+import {
+    arrayIntercalate,
+    iterableFirst,
+    iterableSome,
+} from "collection-utils";
 
 import {
     anyTypeIssueAnnotation,
@@ -9,7 +13,11 @@ import {
     type ForbiddenWordsInfo,
 } from "../../ConvenienceRenderer.js";
 import type { Name, Namer } from "../../Naming.js";
-import type { RenderContext } from "../../Renderer.js";
+import type {
+    BlankLineConfig,
+    ForEachPosition,
+    RenderContext,
+} from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated } from "../../Source.js";
 import { assert } from "../../support/Support.js";
@@ -19,11 +27,13 @@ import {
     type ClassProperty,
     type ClassType,
     EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import {
-    directlyReachableSingleNamedType,
+    directlyReachableTypes,
+    isNamedType,
     matchCompoundType,
     matchType,
     nullableFromUnion,
@@ -37,7 +47,42 @@ import {
     isValueType,
     namingFunction,
     namingFunctionKeep,
+    decodesNullToNull,
+    tupleHasItemFlag,
+    tupleHasItemName,
+    tupleItemName,
+    tupleMemberNames,
+    tupleRestName,
 } from "./utils.js";
+
+/**
+ * How a framework's tuple converter reads and writes items, for
+ * `emitTupleRead` and `emitTupleWrite`.  The converter's `reader`,
+ * `writer` and `value` are in scope.
+ */
+export interface TupleConverterDialect {
+    /** `JsonTokenType` or `JsonToken`. */
+    readonly tokenType: string;
+    /**
+     * A condition on `reader` for a JSON value of the wrong type, if reading
+     * the item doesn't reject all of them.
+     */
+    invalidItem: (t: Type) => string | undefined;
+    /** An expression that reads an item of type `t`. */
+    readItem: (t: Type) => Sourcelike;
+    /**
+     * Writes `item`, of type `t`, or of the nullable type of an optional
+     * item, then not null.
+     */
+    writeItem: (t: Type, item: Sourcelike, isOptional: boolean) => void;
+    cannotUnmarshal: () => void;
+    cannotMarshal: () => void;
+}
+
+// A condition to be joined with `||`.
+function parenthesize(condition: string): string {
+    return condition.includes(" && ") ? `(${condition})` : condition;
+}
 
 const objectMemberNames = [
     "ToString",
@@ -72,7 +117,21 @@ export class CSharpRenderer extends ConvenienceRenderer {
             ...(this._csOptions.useRecords
                 ? ["Clone", "EqualityContract", "PrintMembers", "ToString"]
                 : []),
+            // A member can't have its class's name.
+            ...this.tupleMemberNamesInUse(),
         ];
+    }
+
+    private tupleMemberNamesInUse(): string[] {
+        const names = new Set<string>();
+        for (const t of this.typeGraph.allTypesUnordered()) {
+            if (!(t instanceof TupleType)) continue;
+            for (const name of tupleMemberNames(t)) {
+                names.add(name);
+            }
+        }
+
+        return Array.from(names);
     }
 
     protected forbiddenForObjectProperties(
@@ -123,6 +182,11 @@ export class CSharpRenderer extends ConvenienceRenderer {
         return nullableFromUnion(u) === null;
     }
 
+    // Every tuple is a class with a property per item.
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return true;
+    }
+
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
         // In just-types mode a top-level enum takes the top-level name.
         // Enums are converted with a transformer, so the top-level type
@@ -133,10 +197,21 @@ export class CSharpRenderer extends ConvenienceRenderer {
             if (target instanceof EnumType) return target;
         }
 
-        // If the top-level type doesn't contain any classes or unions
-        // we have to define a class just for the `FromJson` method, in
-        // emitFromJsonForTopLevel.
-        return directlyReachableSingleNamedType(type);
+        // If the top-level type doesn't contain any classes, unions or
+        // tuples we have to define a class just for the `FromJson` method,
+        // in emitFromJsonForTopLevel.
+        const definedTypes = directlyReachableTypes(type, (t) =>
+            (!(t instanceof UnionType) && isNamedType(t)) ||
+            (t instanceof UnionType && nullableFromUnion(t) === null) ||
+            t instanceof TupleType
+                ? new Set([t])
+                : null,
+        );
+        assert(
+            definedTypes.size <= 1,
+            "Cannot have more than one defined type per top-level",
+        );
+        return iterableFirst(definedTypes);
     }
 
     protected emitBlock(f: () => void, semicolon = false): void {
@@ -173,18 +248,8 @@ export class CSharpRenderer extends ConvenienceRenderer {
             (_integerType) => "long",
             (_doubleType) => this.doubleType,
             (_stringType) => "string",
-            (arrayType) => {
-                const itemsType = this.csType(
-                    arrayType.items,
-                    follow,
-                    withIssues,
-                );
-                if (this._csOptions.useList) {
-                    return ["List<", itemsType, ">"];
-                } else {
-                    return [itemsType, "[]"];
-                }
-            },
+            (arrayType) =>
+                this.listType(this.csType(arrayType.items, follow, withIssues)),
             (classType) => this.nameForNamedType(classType),
             (mapType) => [
                 "Dictionary<string, ",
@@ -200,7 +265,15 @@ export class CSharpRenderer extends ConvenienceRenderer {
             },
             (transformedStringType) =>
                 csTypeForTransformedStringType(transformedStringType),
+            (tupleType) => this.nameForNamedType(tupleType),
         );
+    }
+
+    /** `T[]` or `List<T>`, depending on `--array-type`. */
+    protected listType(itemsType: Sourcelike): Sourcelike {
+        return this._csOptions.useList
+            ? ["List<", itemsType, ">"]
+            : [itemsType, "[]"];
     }
 
     protected nullableCSType(
@@ -472,6 +545,214 @@ export class CSharpRenderer extends ConvenienceRenderer {
         this.emitLine("public enum ", enumName, " { ", caseNames, " };");
     }
 
+    // `[A, B?, ...C[]]` is a class with `A Item1`, `B? Item2` and
+    // `C[] Rest`; the converters read and write it as a JSON array.
+    private emitTupleDefinition(t: TupleType, tupleName: Name): void {
+        const property = (csType: Sourcelike, name: string): Sourcelike => [
+            "public ",
+            this._csOptions.virtual ? "virtual " : "",
+            csType,
+            " ",
+            name,
+            " { get; set; }",
+        ];
+        this.emitType(
+            this.descriptionForType(t),
+            AccessModifier.Public,
+            ["partial ", this.objectTypeKind],
+            tupleName,
+            this.baseclassForType(t),
+            () => {
+                t.items.forEach((item, i) => {
+                    const csType =
+                        i < t.minItems
+                            ? this.csType(item, followTargetType, true)
+                            : this.nullableCSType(item, followTargetType, true);
+                    this.emitLine(property(csType, tupleItemName(i)));
+                    if (tupleHasItemFlag(t, i)) {
+                        this.emitLine(property("bool", tupleHasItemName(i)));
+                    }
+                });
+                if (t.rest !== undefined) {
+                    this.emitLine(
+                        property(
+                            this.listType(
+                                this.csType(t.rest, followTargetType, true),
+                            ),
+                            tupleRestName,
+                        ),
+                    );
+                }
+            },
+        );
+    }
+
+    // Reads the required items, the optional ones while there are
+    // elements, then the rest.  An array of the wrong length, or with an
+    // item of the wrong type, throws.
+    protected emitTupleRead(
+        t: TupleType,
+        tupleName: Name,
+        d: TupleConverterDialect,
+    ): void {
+        const atEnd = `reader.TokenType == ${d.tokenType}.EndArray`;
+        const notAtEnd = `reader.TokenType != ${d.tokenType}.EndArray`;
+        const checkItem = (itemType: Type): void => {
+            const invalid = d.invalidItem(itemType);
+            if (invalid === undefined) return;
+            this.emitLine("if (", invalid, ")");
+            this.emitBlock(d.cannotUnmarshal);
+        };
+        this.emitLine(`if (reader.TokenType != ${d.tokenType}.StartArray)`);
+        this.emitBlock(d.cannotUnmarshal);
+        this.ensureBlankLine();
+        this.emitLine("var value = new ", tupleName, "();");
+        this.emitLine("reader.Read();");
+        t.items.forEach((itemType, i) => {
+            const read = (): void => {
+                this.emitLine(
+                    "value.",
+                    tupleItemName(i),
+                    " = ",
+                    d.readItem(itemType),
+                    ";",
+                );
+                if (tupleHasItemFlag(t, i)) {
+                    this.emitLine("value.", tupleHasItemName(i), " = true;");
+                }
+
+                this.emitLine("reader.Read();");
+            };
+            if (i < t.minItems) {
+                const invalid = d.invalidItem(itemType);
+                this.emitLine(
+                    "if (",
+                    atEnd,
+                    invalid === undefined
+                        ? ""
+                        : [" || ", parenthesize(invalid)],
+                    ")",
+                );
+                this.emitBlock(d.cannotUnmarshal);
+                read();
+            } else {
+                this.emitLine("if (", notAtEnd, ")");
+                this.emitBlock(() => {
+                    checkItem(itemType);
+                    read();
+                });
+            }
+        });
+        const rest = t.rest;
+        if (rest === undefined) {
+            this.emitLine("if (", notAtEnd, ")");
+            this.emitBlock(d.cannotUnmarshal);
+        } else {
+            this.emitLine("var rest = new List<", this.csType(rest), ">();");
+            this.emitLine("while (", notAtEnd, ")");
+            this.emitBlock(() => {
+                checkItem(rest);
+                this.emitLine("rest.Add(", d.readItem(rest), ");");
+                this.emitLine("reader.Read();");
+            });
+            this.emitLine(
+                "value.",
+                tupleRestName,
+                " = rest",
+                this._csOptions.useList ? "" : ".ToArray()",
+                ";",
+            );
+        }
+
+        this.ensureBlankLine();
+        this.emitLine("return value;");
+    }
+
+    // Writes the optional items up to the last one that is present, all of
+    // them if the rest isn't empty.  One that can't be null must then be
+    // there: JSON can't leave a gap.
+    protected emitTupleWrite(t: TupleType, d: TupleConverterDialect): void {
+        const item = (i: number): Sourcelike => ["value.", tupleItemName(i)];
+        if (t.items.length > t.minItems) {
+            let length: Sourcelike = t.minItems.toString();
+            for (let i = t.minItems; i < t.items.length; i++) {
+                const present: Sourcelike = tupleHasItemFlag(t, i)
+                    ? [
+                          "(value.",
+                          tupleHasItemName(i),
+                          " || ",
+                          item(i),
+                          " != null)",
+                      ]
+                    : [item(i), " != null"];
+                length = [present, " ? ", (i + 1).toString(), " : ", length];
+            }
+
+            if (t.rest !== undefined) {
+                const count = this._csOptions.useList ? "Count" : "Length";
+                length = [
+                    `(value.${tupleRestName} != null && value.${tupleRestName}.${count} > 0) ? `,
+                    t.items.length.toString(),
+                    " : ",
+                    length,
+                ];
+            }
+
+            this.emitLine("var length = ", length, ";");
+        }
+
+        this.emitLine("writer.WriteStartArray();");
+        t.items.forEach((itemType, i) => {
+            if (i < t.minItems) {
+                d.writeItem(itemType, item(i), false);
+                return;
+            }
+
+            this.emitLine("if (length > ", i.toString(), ")");
+            this.emitBlock(() => {
+                if (!decodesNullToNull(itemType)) {
+                    this.emitLine("if (", item(i), " == null)");
+                    this.emitBlock(d.cannotMarshal);
+                }
+
+                d.writeItem(itemType, item(i), true);
+            });
+        });
+        const rest = t.rest;
+        if (rest !== undefined) {
+            this.emitLine("if (value.", tupleRestName, " != null)");
+            this.emitBlock(() => {
+                this.emitLine(
+                    "foreach (var item in value.",
+                    tupleRestName,
+                    ")",
+                );
+                this.emitBlock(() => d.writeItem(rest, "item", false));
+            });
+        }
+
+        this.emitLine("writer.WriteEndArray();");
+    }
+
+    protected forEachTuple(
+        blankLocations: BlankLineConfig,
+        f: (t: TupleType, name: Name, position: ForEachPosition) => void,
+    ): void {
+        const tuples: Array<[TupleType, TupleType]> = [];
+        const ignore = (): void => {};
+        this.forEachNamedType("none", ignore, ignore, ignore, (t) =>
+            tuples.push([t, t]),
+        );
+        this.forEachSpecificNamedType(blankLocations, tuples, f);
+    }
+
+    protected get haveTuples(): boolean {
+        return iterableSome(
+            this.typeGraph.allTypesUnordered(),
+            (t) => t instanceof TupleType,
+        );
+    }
+
     protected emitExpressionMember(
         declare: Sourcelike,
         define: Sourcelike,
@@ -533,6 +814,9 @@ export class CSharpRenderer extends ConvenienceRenderer {
             "leading-and-interposing",
             (c: ClassType, name: Name) => this.emitClassDefinition(c, name),
         );
+        this.forEachTuple("leading-and-interposing", (t, name) =>
+            this.emitTupleDefinition(t, name),
+        );
         this.forEachEnum("leading-and-interposing", (e, name) =>
             this.emitEnumDefinition(e, name),
         );
@@ -589,6 +873,10 @@ export class CSharpRenderer extends ConvenienceRenderer {
                 (_mapType) => ensureGenericOnce(),
                 (_objectType) => {},
                 (_unionType) => {},
+                (tupleType) =>
+                    tupleType.rest !== undefined && this._csOptions.useList
+                        ? ensureGenericOnce()
+                        : undefined,
             );
         });
     }

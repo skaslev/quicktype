@@ -14,11 +14,12 @@ import {
     utf16LegalizeCharacters,
 } from "../../support/Strings.js";
 import { panic } from "../../support/Support.js";
-import type { Transformation } from "../../Transformers.js";
+import { type Transformation, followTargetType } from "../../Transformers.js";
 import {
     ArrayType,
     EnumType,
     type PrimitiveType,
+    type TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
@@ -157,4 +158,43 @@ export function isValueType(t: Type): boolean {
     return ["integer", "double", "bool", "enum", "date-time", "uuid"].includes(
         t.kind,
     );
+}
+
+/**
+ * A tuple is a class with properties `Item1`, `Item2`, ... for its items
+ * and `Rest` for the elements after them.  An optional item is null when
+ * it's missing, so one that can be null itself also has `HasItem<n>`.
+ */
+export function tupleItemName(index: number): string {
+    return `Item${index + 1}`;
+}
+
+export function tupleHasItemName(index: number): string {
+    return `Has${tupleItemName(index)}`;
+}
+
+export const tupleRestName = "Rest";
+
+/** Whether JSON null decodes to C# null, rather than a value of the type. */
+export function decodesNullToNull(t: Type): boolean {
+    const target = followTargetType(t);
+    return (
+        target.kind === "null" ||
+        target.kind === "any" ||
+        (target instanceof UnionType && nullableFromUnion(target) !== null)
+    );
+}
+
+export function tupleHasItemFlag(t: TupleType, index: number): boolean {
+    return index >= t.minItems && decodesNullToNull(t.items[index]);
+}
+
+export function tupleMemberNames(t: TupleType): string[] {
+    const names: string[] = [];
+    t.items.forEach((_, i) => {
+        names.push(tupleItemName(i));
+        if (tupleHasItemFlag(t, i)) names.push(tupleHasItemName(i));
+    });
+    if (t.rest !== undefined) names.push(tupleRestName);
+    return names;
 }

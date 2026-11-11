@@ -11,6 +11,7 @@ import { TargetLanguage } from "../../TargetLanguage.js";
 import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
+    TupleSupport,
     Type,
 } from "../../Type/index.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
@@ -184,6 +185,12 @@ export class CSharpTargetLanguage extends TargetLanguage<
 
     public get supportsRecursiveUnions(): boolean {
         return true;
+    }
+
+    // Tuples are classes with a property per item, which the generated
+    // converters read and write as JSON arrays.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     public get supportsOptionalClassProperties(): boolean {

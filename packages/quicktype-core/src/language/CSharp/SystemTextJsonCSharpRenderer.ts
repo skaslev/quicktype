@@ -36,24 +36,31 @@ import {
     type ClassProperty,
     ClassType,
     EnumType,
+    TupleType,
     type Type,
     UnionType,
 } from "../../Type/index.js";
 import { nullableFromUnion } from "../../Type/TypeUtils.js";
 
-import { CSharpRenderer } from "./CSharpRenderer.js";
+import {
+    CSharpRenderer,
+    type TupleConverterDialect,
+} from "./CSharpRenderer.js";
 import type { systemTextJsonCSharpOptions } from "./language.js";
 import {
     AccessModifier,
     alwaysApplyTransformation,
     denseJsonPropertyName,
     denseNullValueHandlingEnumName,
+    decodesNullToNull,
     isValueType,
     namingFunction,
 } from "./utils.js";
 
 export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
     private readonly _enumExtensionsNames = new Map<Name, Name>();
+
+    private readonly _tupleConverterNames = new Map<Name, Name>();
 
     private readonly _needHelpers: boolean;
 
@@ -64,7 +71,8 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
     private get needConverterClass(): boolean {
         return (
             this._needHelpers ||
-            (this._needAttributes && (this.haveNamedUnions || this.haveEnums))
+            (this._needAttributes &&
+                (this.haveNamedUnions || this.haveEnums || this.haveTuples))
         );
     }
 
@@ -159,6 +167,16 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
         t: Type,
         name: Name,
     ): DependencyName[] {
+        if (t instanceof TupleType) {
+            const converterName = new DependencyName(
+                namingFunction,
+                name.order + 30,
+                (lookup) => `${lookup(name)}_converter`,
+            );
+            this._tupleConverterNames.set(name, converterName);
+            return [converterName];
+        }
+
         if (!(t instanceof EnumType)) return [];
 
         const extensionsName = new DependencyName(
@@ -361,7 +379,8 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
         if (definedType !== undefined) {
             partial = "partial ";
             typeKind =
-                definedType instanceof ClassType
+                definedType instanceof ClassType ||
+                definedType instanceof TupleType
                     ? this.objectTypeKind
                     : "struct";
         } else {
@@ -543,6 +562,17 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
                             }
                         }
 
+                        this.forEachTuple("none", (_, name) =>
+                            this.emitLine(
+                                this.converterObject(
+                                    defined(
+                                        this._tupleConverterNames.get(name),
+                                    ),
+                                ),
+                                ",",
+                            ),
+                        );
+
                         if (this._options.dateTimeOnlyConverters) {
                             this.emitLine("new DateOnlyConverter(),");
                             this.emitLine("new TimeOnlyConverter(),");
@@ -695,6 +725,16 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
             return true;
         }
 
+        if (xfer instanceof ChoiceTransformer) {
+            return this.emitArrayMemberChoice(
+                xfer,
+                targetType,
+                emitFinish,
+                variableName,
+                varGen,
+            );
+        }
+
         if (xfer instanceof DecodingChoiceTransformer) {
             this.emitDecoderSwitch(() => {
                 const nullTransformer = xfer.nullTransformer;
@@ -820,6 +860,55 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
         }
 
         return panic("Unknown transformer");
+    }
+
+    // The members of a union a JSON array can be: tuples, those that take
+    // fewer lengths first, and the array last.  A tuple that doesn't match
+    // throws, and the next member reads the array from its start again.
+    // `emitFinish` returns, so the first member that matches is taken.
+    private emitArrayMemberChoice(
+        xfer: ChoiceTransformer,
+        targetType: Type,
+        emitFinish: (value: Sourcelike) => void,
+        variableName: string,
+        varGen: { counter: number },
+    ): boolean {
+        for (const member of xfer.transformers) {
+            if (!member.canFail) {
+                let allHandled = false;
+                this.emitBlock(() => {
+                    allHandled = this.emitDecodeTransformer(
+                        member,
+                        targetType,
+                        emitFinish,
+                        variableName,
+                        varGen,
+                    );
+                });
+                return allHandled;
+            }
+
+            this.emitBlock(() => {
+                this.emitLine("var arrayStart = reader;");
+                this.emitLine("try");
+                this.emitBlock(() =>
+                    this.emitDecodeTransformer(
+                        member,
+                        targetType,
+                        emitFinish,
+                        variableName,
+                        varGen,
+                    ),
+                );
+                // The date converters let `Parse`'s FormatException through.
+                this.emitLine(
+                    "catch (Exception e) when (e is JsonException || e is FormatException)",
+                );
+                this.emitBlock(() => this.emitLine("reader = arrayStart;"));
+            });
+        }
+
+        return false;
     }
 
     private stringCaseValue(t: Type, stringCase: string): Sourcelike {
@@ -1332,6 +1421,166 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
         );
     }
 
+    private tupleConverterName(tupleName: Name): Name {
+        return defined(this._tupleConverterNames.get(tupleName));
+    }
+
+    // A JSON value the item's type can't take, beyond what deserializing
+    // it rejects: JSON null decodes to null for reference types.
+    private tupleItemIsInvalid(t: Type): string | undefined {
+        if (this.converterForType(t) !== undefined) return undefined;
+        const target = followTargetType(t);
+        if (target.kind === "null") {
+            return "reader.TokenType != JsonTokenType.Null";
+        }
+
+        if (isValueType(target) || decodesNullToNull(target)) return undefined;
+        return "reader.TokenType == JsonTokenType.Null";
+    }
+
+    private readTupleItem(t: Type): Sourcelike {
+        const csType = this.csType(t);
+        const target = followTargetType(t);
+        // `Deserialize<T>` returns `T?`.  A reference type declared without
+        // `?` can't be null here (`tupleItemIsInvalid`), or is `object`,
+        // which takes any JSON value, or is nullable before C# 8, which has
+        // no `?` for references.
+        const nullable =
+            target instanceof UnionType ? nullableFromUnion(target) : null;
+        const isDeclaredNullable =
+            nullable !== null &&
+            (isValueType(followTargetType(nullable)) ||
+                this._options.version >= 8);
+        const notNull = !isValueType(target) && !isDeclaredNullable ? "!" : "";
+        const converter = this.converterForType(t);
+        if (converter === undefined) {
+            return [
+                "JsonSerializer.Deserialize<",
+                csType,
+                ">(ref reader, options)",
+                notNull,
+            ];
+        }
+
+        // The converter is for the non-null type.
+        const nonNullType = nullable === null ? csType : this.csType(nullable);
+        const read = [
+            this.converterObject(converter),
+            ".Read(ref reader, typeof(",
+            nonNullType,
+            "), options)",
+        ];
+        if (nullable === null) return [read, notNull];
+        const orNull = [
+            "reader.TokenType == JsonTokenType.Null ? null : (",
+            nonNullType,
+            "?)",
+            read,
+        ];
+        return notNull === "" ? orNull : ["(", orNull, ")", notNull];
+    }
+
+    // `value` is of the item's type, or the nullable type of an optional
+    // item, then not null.
+    private emitWriteTupleItem(
+        t: Type,
+        value: Sourcelike,
+        isOptional: boolean,
+    ): void {
+        const converter = this.converterForType(t);
+        if (converter === undefined) {
+            // A `dynamic` value would pick the overload at run time, which
+            // fails for null.
+            const isDynamic =
+                this._options.typeForAny === "dynamic" &&
+                ["any", "null"].includes(followTargetType(t).kind);
+            this.emitLine(
+                this.serializeValueCode(
+                    isDynamic ? ["(object?)", value] : value,
+                ),
+                ";",
+            );
+            return;
+        }
+
+        const write = (v: Sourcelike): void =>
+            this.emitLine(
+                this.converterObject(converter),
+                ".Write(writer, ",
+                v,
+                ", options);",
+            );
+        const nullable = t instanceof UnionType ? nullableFromUnion(t) : null;
+        if (nullable !== null) {
+            const nonNull = isValueType(followTargetType(nullable))
+                ? [value, ".Value"]
+                : value;
+            this.emitLine("if (", value, " == null)");
+            this.emitBlock(() => this.emitLine("writer.WriteNullValue();"));
+            this.emitLine("else");
+            this.emitBlock(() => write(nonNull));
+        } else {
+            write(
+                isOptional && isValueType(followTargetType(t))
+                    ? [value, ".Value"]
+                    : value,
+            );
+        }
+    }
+
+    // Reads and writes a tuple's class as a JSON array.
+    private emitTupleConverter(t: TupleType, tupleName: Name): void {
+        const converterName = this.tupleConverterName(tupleName);
+        const dialect: TupleConverterDialect = {
+            tokenType: "JsonTokenType",
+            invalidItem: (itemType) => this.tupleItemIsInvalid(itemType),
+            readItem: (itemType) => this.readTupleItem(itemType),
+            writeItem: (itemType, item, isOptional) =>
+                this.emitWriteTupleItem(itemType, item, isOptional),
+            cannotUnmarshal: () =>
+                this.emitThrow("JsonException", [
+                    '"Cannot unmarshal type ',
+                    tupleName,
+                    '"',
+                ]),
+            cannotMarshal: () =>
+                this.emitThrow("NotSupportedException", [
+                    '"Cannot marshal type ',
+                    tupleName,
+                    '"',
+                ]),
+        };
+        this.emitType(
+            undefined,
+            AccessModifier.Internal,
+            "class",
+            converterName,
+            ["JsonConverter<", tupleName, ">"],
+            () => {
+                this.emitCanConvert(["t == typeof(", tupleName, ")"]);
+                this.ensureBlankLine();
+                this.emitReadJson(
+                    () => this.emitTupleRead(t, tupleName, dialect),
+                    tupleName,
+                );
+                this.ensureBlankLine();
+                this.emitWriteJson(
+                    "value",
+                    () => this.emitTupleWrite(t, dialect),
+                    tupleName,
+                );
+                this.ensureBlankLine();
+                this.emitLine(
+                    "public static readonly ",
+                    converterName,
+                    " Singleton = new ",
+                    converterName,
+                    "();",
+                );
+            },
+        );
+    }
+
     protected emitRequiredHelpers(): void {
         if (this._needHelpers) {
             this.forEachTopLevel("leading-and-interposing", (t, n) =>
@@ -1346,6 +1595,9 @@ export class SystemTextJsonCSharpRenderer extends CSharpRenderer {
             this.emitConverterClass();
             this.forEachTransformation("leading-and-interposing", (n, t) =>
                 this.emitTransformation(n, t),
+            );
+            this.forEachTuple("leading-and-interposing", (t, n) =>
+                this.emitTupleConverter(t, n),
             );
             if (this._options.dateTimeOnlyConverters) {
                 this.emitDateTimeOnlyConverters();
