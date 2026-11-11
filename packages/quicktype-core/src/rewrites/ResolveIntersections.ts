@@ -352,6 +352,12 @@ class IntersectionAccumulator
             this._lostTypeAttributes = true;
         }
 
+        // Types without values in common, like a string and an integer,
+        // intersect to none, as an empty union is, and as a `false` schema.
+        if (kinds.size === 0) {
+            kinds.set("none", emptyTypeAttributes);
+        }
+
         return kinds;
     }
 
