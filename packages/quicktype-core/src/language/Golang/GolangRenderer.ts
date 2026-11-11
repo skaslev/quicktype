@@ -1,3 +1,5 @@
+import { iterableSome } from "collection-utils";
+
 import {
     anyTypeIssueAnnotation,
     nullTypeIssueAnnotation,
@@ -454,9 +456,64 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         this.endFile();
     }
 
+    // The classes of a union with several, which its `UnmarshalJSON` tries in
+    // turn, in that order.  A class only takes an object with all its
+    // required properties, no unknown ones, and null only for nullable
+    // ones, so two classes only take the same object if it is valid for
+    // both, as with an `anyOf`, or if it is invalid only in a way that isn't
+    // checked, such as an unknown key in a nested object.  The class that
+    // requires more of the object's properties is the more specific type
+    // then, so classes with more required properties are tried first, and
+    // others in the order of the union.
+    private unionClassesInTryOrder(u: UnionType): ClassType[] | undefined {
+        const classes = Array.from(u.members).filter(
+            (t): t is ClassType => t instanceof ClassType,
+        );
+        if (classes.length < 2) return undefined;
+
+        const requiredCount = (c: ClassType): number =>
+            Array.from(c.getProperties().values()).filter((p) => !p.isOptional)
+                .length;
+        return classes.sort((a, b) => requiredCount(b) - requiredCount(a));
+    }
+
+    private get haveUnionsWithClasses(): boolean {
+        return iterableSome(
+            this.namedUnions,
+            (u) => this.unionClassesInTryOrder(u) !== undefined,
+        );
+    }
+
+    // The arguments of `unmarshalClass` that describe the properties of `c`.
+    private unmarshalClassArgs(c: ClassType): Sourcelike {
+        const required: string[] = [];
+        const optional: string[] = [];
+        const nullable: string[] = [];
+        for (const [jsonName, p] of c.getProperties()) {
+            const literal = `"${stringEscape(jsonName)}"`;
+            (p.isOptional ? optional : required).push(literal);
+            if (p.type.isNullable) nullable.push(literal);
+        }
+
+        const list = (names: string[]): string =>
+            names.length === 0 ? "nil" : `[]string{${names.join(", ")}}`;
+        return [list(required), ", ", list(optional), ", ", list(nullable)];
+    }
+
     private emitUnion(u: UnionType, unionName: Name): void {
         this.startFile(unionName);
-        this.emitPackageDefinitons(false, this.collectUnionImports(u));
+        const classes = this.unionClassesInTryOrder(u);
+        const imports = this.collectUnionImports(u);
+        if (
+            classes !== undefined &&
+            !this._options.justTypes &&
+            !this._options.justTypesAndPackage
+        ) {
+            imports.add("encoding/json");
+            imports.add("errors");
+        }
+
+        this.emitPackageDefinitons(false, imports);
         const [hasNull, nonNulls] = removeNullFromUnion(u);
         const isNullableArg = hasNull !== null ? "true" : "false";
 
@@ -524,6 +581,12 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         }
 
         this.ensureBlankLine();
+        if (classes !== undefined) {
+            this.emitUnionWithClassesFunctions(u, unionName, classes, makeArgs);
+            this.endFile();
+            return;
+        }
+
         this.emitFunc(
             ["(x *", unionName, ") UnmarshalJSON(data []byte) error"],
             () => {
@@ -568,6 +631,110 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             },
         );
         this.endFile();
+    }
+
+    // `unmarshalUnion` and `marshalUnion` handle a single class.  For a union
+    // with several, the former only tells whether the value is an object,
+    // which is then decoded into the first class that takes it, see
+    // `unionClassesInTryOrder`, and the latter handles everything but the
+    // classes.
+    private emitUnionWithClassesFunctions(
+        u: UnionType,
+        unionName: Name,
+        classes: readonly ClassType[],
+        makeArgs: (
+            primitiveArg: (fieldName: Sourcelike) => Sourcelike,
+            compoundArg: (
+                isClass: boolean,
+                fieldName: Sourcelike,
+            ) => Sourcelike,
+        ) => Sourcelike,
+    ): void {
+        this.emitFunc(
+            ["(x *", unionName, ") UnmarshalJSON(data []byte) error"],
+            () => {
+                for (const kind of compoundTypeKinds) {
+                    for (const t of u.members) {
+                        if (t.kind !== kind) continue;
+                        this.emitLine(
+                            "x.",
+                            this.nameForUnionMember(u, t),
+                            " = nil",
+                        );
+                    }
+                }
+
+                const args = makeArgs(
+                    (fn) => ["&x.", fn],
+                    (isClass, fn) =>
+                        isClass
+                            ? "true, new(json.RawMessage)"
+                            : ["true, &x.", fn],
+                );
+                this.emitLine(
+                    "object, err := unmarshalUnion(data, ",
+                    args,
+                    ")",
+                );
+                this.emitBlock("if err != nil", () => {
+                    this.emitLine("return err");
+                });
+                this.emitBlock("if object", () => {
+                    for (const c of classes) {
+                        this.emitBlock(
+                            [
+                                "if c := new(",
+                                this.goType(c),
+                                "); unmarshalClass(data, c, ",
+                                this.unmarshalClassArgs(c),
+                                ")",
+                            ],
+                            () => {
+                                this.emitLine(
+                                    "x.",
+                                    this.nameForUnionMember(u, c),
+                                    " = c",
+                                );
+                                this.emitLine("return nil");
+                            },
+                        );
+                    }
+
+                    this.emitLine(
+                        'return errors.New("Object does not match any class of the union")',
+                    );
+                });
+                this.emitLine("return nil");
+            },
+        );
+        this.ensureBlankLine();
+        // A value receiver, as in `emitUnion`.
+        this.emitFunc(
+            ["(x ", unionName, ") MarshalJSON() ([]byte, error)"],
+            () => {
+                this.forEachUnionMember(
+                    u,
+                    new Set(classes),
+                    "none",
+                    null,
+                    (fieldName) => {
+                        this.emitBlock(["if x.", fieldName, " != nil"], () => {
+                            this.emitLine(
+                                "return json.Marshal(x.",
+                                fieldName,
+                                ")",
+                            );
+                        });
+                    },
+                );
+                const args = makeArgs(
+                    (fn) => ["x.", fn],
+                    (isClass, fn) =>
+                        isClass ? "false, nil" : ["x.", fn, " != nil, x.", fn],
+                );
+                this.emitLine("return marshalUnion(", args, ")");
+            },
+        );
     }
 
     private emitSingleFileHeaderComments(): void {
@@ -770,6 +937,42 @@ func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, 
 	}
 	return nil, errors.New("Union must not be null")
 }`);
+            if (this.haveUnionsWithClasses) {
+                this.ensureBlankLine();
+                this.emitMultiline(`// unmarshalClass decodes data into pc, a pointer to a struct, if data is an
+// object with all the required properties, no others but the optional ones,
+// and null only for the nullable ones.
+func unmarshalClass(data []byte, pc interface{}, required []string, optional []string, nullable []string) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(data, &object) != nil || object == nil {
+		return false
+	}
+	for _, name := range required {
+		if _, ok := object[name]; !ok {
+			return false
+		}
+	}
+	for name, value := range object {
+		if !containsName(required, name) && !containsName(optional, name) {
+			return false
+		}
+		if string(value) == "null" && !containsName(nullable, name) {
+			return false
+		}
+	}
+	return json.Unmarshal(data, pc) == nil
+}
+
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}`);
+            }
+
             this.endFile();
         }
     }

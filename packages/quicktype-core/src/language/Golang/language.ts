@@ -75,6 +75,10 @@ export class GoTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsUnionsWithMultipleClasses(): boolean {
+        return true;
+    }
+
     public get stringTypeMapping(): StringTypeMapping {
         const mapping: Map<TransformedStringTypeKind, PrimitiveStringTypeKind> =
             new Map();
