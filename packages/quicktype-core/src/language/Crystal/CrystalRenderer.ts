@@ -14,7 +14,7 @@ import {
     removeNullFromUnion,
 } from "../../Type/TypeUtils.js";
 import {
-    type ClassType,
+    ClassType,
     type EnumType,
     type Type,
     UnionType,
@@ -206,14 +206,60 @@ export class CrystalRenderer extends ConvenienceRenderer {
             types.push([crystalType]);
         });
 
-        this.emitLine([
-            "alias ",
-            unionName,
-            " = ",
-            types
-                .map((r) => r.map((sl) => this.sourcelikeToString(sl)))
-                .join(" | "),
-        ]);
+        const members = types.map((r) =>
+            r.map((sl) => this.sourcelikeToString(sl)).join(""),
+        );
+        if (this.isRecursiveUnion(u)) {
+            this.emitRecursiveUnion(unionName, members);
+            return;
+        }
+
+        this.emitLine(["alias ", unionName, " = ", members.join(" | ")]);
+    }
+
+    /**
+     * A union that contains itself other than through a class is a struct
+     * holding the value, as `JSON::Any` is.  Crystal compiles a recursive
+     * alias but gives it no `new(pull)`, so it can't be read from JSON, and
+     * its nilable references (`Array(R?)`) don't compile once they're read.
+     */
+    private emitRecursiveUnion(unionName: Name, members: string[]): void {
+        const type = members.join(" | ");
+        this.emitLine("struct ", unionName);
+        this.indent(() => {
+            this.emitLine("getter value : ", type);
+            this.ensureBlankLine();
+            this.emitLine("def initialize(@value : ", type, ")");
+            this.emitLine("end");
+            this.ensureBlankLine();
+            this.emitLine("def self.new(pull : JSON::PullParser)");
+            this.indent(() =>
+                this.emitLine("new(Union(", members.join(", "), ").new(pull))"),
+            );
+            this.emitLine("end");
+            this.ensureBlankLine();
+            this.emitLine("def to_json(json : JSON::Builder) : Nil");
+            this.indent(() => this.emitLine("@value.to_json(json)"));
+            this.emitLine("end");
+        });
+        this.emitLine("end");
+    }
+
+    /**
+     * Whether a union contains itself other than through a class, i.e.
+     * whether its alias would refer to itself.
+     */
+    private isRecursiveUnion(u: UnionType): boolean {
+        const seen = new Set<Type>();
+        const work = Array.from(u.getNonAttributeChildren());
+        for (let t = work.pop(); t !== undefined; t = work.pop()) {
+            if (t === u) return true;
+            if (seen.has(t) || t instanceof ClassType) continue;
+            seen.add(t);
+            work.push(...t.getNonAttributeChildren());
+        }
+
+        return false;
     }
 
     protected emitTopLevelAlias(t: Type, name: Name): void {
