@@ -22,6 +22,7 @@ import {
     type ClassType,
     EnumType,
     MapType,
+    TupleType,
     type Type,
     type TypeKind,
     UnionType,
@@ -40,6 +41,9 @@ import {
     stringEscape,
     swiftNameStyle,
 } from "./utils.js";
+
+/// A property's name and Swift type.
+type SwiftField = readonly [name: Sourcelike, type: Sourcelike];
 
 export class SwiftRenderer extends ConvenienceRenderer {
     private _currentFilename: string | undefined;
@@ -120,10 +124,16 @@ export class SwiftRenderer extends ConvenienceRenderer {
         return kind === "array" || kind === "map";
     }
 
+    // Swift's tuples can't conform to Codable, so every tuple is a struct
+    // with a property per item.
+    protected tupleNeedsName(_t: TupleType): boolean {
+        return true;
+    }
+
     // A nullable union is an optional, not an enum that could be `indirect`,
     // so it can't break a cycle.  Its non-null member can: that member is
-    // on the same cycle, and it's a class, because unions are flattened and
-    // arrays and maps break cycles implicitly.
+    // on the same cycle, and it's a class or a tuple, because unions are
+    // flattened and arrays and maps break cycles implicitly.
     protected canBreakCycles(t: Type): boolean {
         return !(t instanceof UnionType && nullableFromUnion(t) !== null);
     }
@@ -231,6 +241,7 @@ export class SwiftRenderer extends ConvenienceRenderer {
                     `Transformed string type ${transformedStringType.kind} not supported`,
                 );
             },
+            (tupleType) => this.nameForNamedType(tupleType),
         );
     }
 
@@ -545,15 +556,9 @@ export class SwiftRenderer extends ConvenienceRenderer {
         ];
     }
 
-    private renderClassDefinition(c: ClassType, className: Name): void {
-        this.startFile(className);
-
-        this.renderHeader(c, className);
-        this.emitDescription(this.descriptionForType(c));
-
-        this.emitMark(this.sourcelikeToString(className), true);
-
-        const isClass = this._options.useClasses || this.isCycleBreakerType(c);
+    /// The declaration of a struct, or of a class if `isClass`, with the
+    /// protocols of the options.  `@objcMembers` comes before it.
+    private structOrClassDeclaration(isClass: boolean, name: Name): Sourcelike {
         const structOrClass = isClass ? "class" : "struct";
         const finalPrefix =
             isClass &&
@@ -567,14 +572,26 @@ export class SwiftRenderer extends ConvenienceRenderer {
             this.emitItem(this.objcMembersDeclaration);
         }
 
+        return [
+            finalPrefix,
+            structOrClass,
+            " ",
+            name,
+            this.getProtocolString(structOrClass),
+        ];
+    }
+
+    private renderClassDefinition(c: ClassType, className: Name): void {
+        this.startFile(className);
+
+        this.renderHeader(c, className);
+        this.emitDescription(this.descriptionForType(c));
+
+        this.emitMark(this.sourcelikeToString(className), true);
+
+        const isClass = this._options.useClasses || this.isCycleBreakerType(c);
         this.emitBlockWithAccess(
-            [
-                finalPrefix,
-                structOrClass,
-                " ",
-                className,
-                this.getProtocolString(structOrClass),
-            ],
+            this.structOrClassDeclaration(isClass, className),
             () => {
                 if (this._options.dense) {
                     let lastProperty: ClassProperty | undefined;
@@ -722,20 +739,7 @@ export class SwiftRenderer extends ConvenienceRenderer {
                     // https://github.com/quicktype/quicktype/issues/899
                     this._options.accessLevel === "public"
                 ) {
-                    // Make an initializer that initalizes all fields
                     this.ensureBlankLine();
-                    const initProperties = this.initializableProperties(c);
-                    const propertiesLines: Sourcelike[] = [];
-                    for (const property of initProperties) {
-                        if (propertiesLines.length > 0)
-                            propertiesLines.push(", ");
-                        propertiesLines.push(
-                            property.name,
-                            ": ",
-                            this.swiftPropertyType(property.parameter),
-                        );
-                    }
-
                     if (
                         this.propertyCount(c) === 0 &&
                         this._options.objcSupport
@@ -744,18 +748,8 @@ export class SwiftRenderer extends ConvenienceRenderer {
                             return "";
                         });
                     } else {
-                        this.emitBlockWithAccess(
-                            ["init(", ...propertiesLines, ")"],
-                            () => {
-                                for (const property of initProperties) {
-                                    this.emitLine(
-                                        "self.",
-                                        property.name,
-                                        " = ",
-                                        property.name,
-                                    );
-                                }
-                            },
+                        this.emitMemberwiseInitializer(
+                            this.classPropertyFields(c),
                         );
                     }
                 }
@@ -770,16 +764,11 @@ export class SwiftRenderer extends ConvenienceRenderer {
         );
 
         // FIXME: We emit only the MARK line for top-level-enum.schema
-        if (!this._options.justTypes && this._options.convenienceInitializers) {
-            this.ensureBlankLine();
-            this.emitMark(
-                this.sourcelikeToString(className) +
-                    " convenience initializers and mutators",
-            );
-            this.ensureBlankLine();
-            this.emitConvenienceInitializersExtension(c, className);
-            this.ensureBlankLine();
-        }
+        this.emitConvenienceInitializers(
+            isClass,
+            className,
+            this.classPropertyFields(c),
+        );
 
         this.endFile();
     }
@@ -833,6 +822,290 @@ export class SwiftRenderer extends ConvenienceRenderer {
                 this.emitLine("hasher.combine(self.", name, ")");
             }
         });
+    }
+
+    /// The name and type of each property of a class.
+    private classPropertyFields(c: ClassType): SwiftField[] {
+        return this.initializableProperties(c).map((property) => [
+            property.name,
+            this.swiftPropertyType(property.parameter),
+        ]);
+    }
+
+    /// An initializer that initializes all properties.
+    private emitMemberwiseInitializer(fields: readonly SwiftField[]): void {
+        const parameters: Sourcelike[] = [];
+        for (const [name, type] of fields) {
+            if (parameters.length > 0) parameters.push(", ");
+            parameters.push(name, ": ", type);
+        }
+
+        this.emitBlockWithAccess(["init(", ...parameters, ")"], () => {
+            for (const [name] of fields) {
+                this.emitLine("self.", name, " = ", name);
+            }
+        });
+    }
+
+    private emitConvenienceInitializers(
+        isClass: boolean,
+        name: Name,
+        fields: readonly SwiftField[],
+    ): void {
+        if (this._options.justTypes || !this._options.convenienceInitializers) {
+            return;
+        }
+
+        this.ensureBlankLine();
+        this.emitMark(
+            this.sourcelikeToString(name) +
+                " convenience initializers and mutators",
+        );
+        this.ensureBlankLine();
+        this.emitConvenienceInitializersExtension(isClass, name, fields);
+        this.ensureBlankLine();
+    }
+
+    /// Whether a type's Swift type is an optional because the type is
+    /// nullable: a nullable union, or null.
+    private isNullableSwiftType(t: Type): boolean {
+        return (
+            t.kind === "null" ||
+            (t instanceof UnionType && nullableFromUnion(t) !== null)
+        );
+    }
+
+    /// A property `itemN` per tuple item, and `rest` for the rest.  An item
+    /// that may be missing is an optional, so an optional item of a nullable
+    /// type is a double optional, `nil` if the item is missing and
+    /// `.some(nil)` if it's null: both re-encode as they were.
+    private tupleFields(t: TupleType): SwiftField[] {
+        const fields: SwiftField[] = t.items.map((item, i) => {
+            const type = this.swiftType(item, true);
+            return [`item${i}`, i < t.minItems ? type : [type, "?"]];
+        });
+        if (t.rest !== undefined) {
+            fields.push(["rest", ["[", this.swiftType(t.rest, true), "]"]]);
+        }
+
+        return fields;
+    }
+
+    /// A tuple is a struct with a property per item (see `tupleFields`).
+    /// Its `init(from:)` and `encode(to:)` read and write a JSON array.
+    private renderTupleDefinition(t: TupleType, tupleName: Name): void {
+        this.startFile(tupleName);
+
+        this.renderHeader(t, tupleName);
+        this.emitDescription(this.descriptionForType(t));
+
+        this.emitMark(this.sourcelikeToString(tupleName), true);
+
+        // A struct can't contain itself, so a tuple that contains itself
+        // other than through an array or a dictionary is a class.
+        const isClass = this._options.useClasses || this.isCycleBreakerType(t);
+        const fields = this.tupleFields(t);
+        this.emitBlockWithAccess(
+            this.structOrClassDeclaration(isClass, tupleName),
+            () => {
+                this.emitTupleProperties(t, fields);
+
+                // `init(from:)` takes the place of a struct's implicit
+                // memberwise initializer.
+                if (
+                    isClass ||
+                    this._options.accessLevel === "public" ||
+                    !this._options.justTypes
+                ) {
+                    this.ensureBlankLine();
+                    this.emitMemberwiseInitializer(fields);
+                }
+
+                if (!this._options.justTypes) {
+                    this.ensureBlankLine();
+                    this.emitTupleDecoder(t, tupleName, isClass);
+                    this.ensureBlankLine();
+                    this.emitTupleEncoder(t, tupleName);
+                }
+
+                if (isClass) {
+                    this.emitClassEquatableAndHashable(
+                        tupleName,
+                        fields.map(([name]) => name),
+                    );
+                }
+            },
+        );
+
+        this.emitConvenienceInitializers(isClass, tupleName, fields);
+
+        this.endFile();
+    }
+
+    /// In dense mode consecutive items of the same type share a line, like
+    /// class properties.
+    private emitTupleProperties(
+        t: TupleType,
+        fields: readonly SwiftField[],
+    ): void {
+        // Not the rest, and not the first optional item after a required
+        // one.
+        const sameLine = (i: number, line: readonly SwiftField[]): boolean =>
+            this._options.dense &&
+            i > 0 &&
+            i < t.items.length &&
+            i !== t.minItems &&
+            line.length < MAX_SAMELINE_PROPERTIES &&
+            t.items[i] === t.items[i - 1];
+        const lines: SwiftField[][] = [];
+        fields.forEach((field, i) => {
+            const line = lines[lines.length - 1];
+            if (line !== undefined && sameLine(i, line)) line.push(field);
+            else lines.push([field]);
+        });
+        for (const line of lines) {
+            this.emitLine(
+                this.accessLevel,
+                this._options.mutableProperties ? "var " : "let ",
+                arrayIntercalate<Sourcelike>(
+                    ", ",
+                    line.map(([name]) => name),
+                ),
+                ": ",
+                line[0][1],
+            );
+        }
+    }
+
+    /// Decodes the next element of `container`, or `nil` for null if the
+    /// type is nullable.  A null element of a type that isn't is an error.
+    private tupleElementDecoding(t: Type): Sourcelike {
+        if (this.isNullableSwiftType(t)) {
+            return [
+                "container.decodeNil() ? nil : container.decode(",
+                this.swiftType(t, false, true),
+                ".self)",
+            ];
+        }
+
+        return ["container.decode(", this.swiftType(t), ".self)"];
+    }
+
+    /// Reads the required items, then the optional ones that are present,
+    /// then the rest.  Too few elements fail to decode a required item; too
+    /// many are an error unless the tuple has a rest.
+    private emitTupleDecoder(
+        t: TupleType,
+        tupleName: Name,
+        isClass: boolean,
+    ): void {
+        this.emitBlockWithAccess(
+            [isClass ? "required " : "", "init(from decoder: Decoder) throws"],
+            () => {
+                this.emitLine("var container = try decoder.unkeyedContainer()");
+                t.items.forEach((item, i) => {
+                    const value = this.tupleElementDecoding(item);
+                    if (i < t.minItems) {
+                        this.emitLine(`item${i} = try `, value);
+                    } else if (this.isNullableSwiftType(item)) {
+                        this.emitLine(
+                            `item${i} = try container.isAtEnd ? nil : .some(`,
+                            value,
+                            ")",
+                        );
+                    } else {
+                        this.emitLine(
+                            `item${i} = try container.isAtEnd ? nil : `,
+                            value,
+                        );
+                    }
+                });
+
+                const rest = t.rest;
+                if (rest !== undefined) {
+                    this.emitLine(
+                        "var rest: [",
+                        this.swiftType(rest),
+                        "] = []",
+                    );
+                    this.emitBlock("while !container.isAtEnd", () =>
+                        this.emitLine(
+                            "rest.append(try ",
+                            this.tupleElementDecoding(rest),
+                            ")",
+                        ),
+                    );
+                    this.emitLine("self.rest = rest");
+                    return;
+                }
+
+                const count =
+                    t.minItems === t.items.length
+                        ? t.items.length.toString()
+                        : `${t.minItems} to ${t.items.length}`;
+                this.emitBlock("if !container.isAtEnd", () =>
+                    this.emitLine(
+                        'throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected ',
+                        count,
+                        " elements for ",
+                        tupleName,
+                        '")',
+                    ),
+                );
+            },
+        );
+    }
+
+    /// An item may only follow an optional item that is present: a JSON
+    /// array can't leave a gap.
+    private tupleGapCondition(t: TupleType): string | undefined {
+        const conditions: string[] = [];
+        for (let i = t.minItems + 1; i < t.items.length; i++) {
+            conditions.push(`item${i - 1} == nil && item${i} != nil`);
+        }
+
+        if (t.rest !== undefined && t.minItems < t.items.length) {
+            conditions.push(
+                `item${t.items.length - 1} == nil && !rest.isEmpty`,
+            );
+        }
+
+        if (conditions.length <= 1) return conditions[0];
+        return conditions.map((c) => `(${c})`).join(" || ");
+    }
+
+    /// Writes the required items, the optional ones that are present, then
+    /// the rest.
+    private emitTupleEncoder(t: TupleType, tupleName: Name): void {
+        this.emitBlockWithAccess(
+            "func encode(to encoder: Encoder) throws",
+            () => {
+                const gap = this.tupleGapCondition(t);
+                if (gap !== undefined) {
+                    this.emitBlock(["if ", gap], () =>
+                        this.emitLine(
+                            'throw EncodingError.invalidValue(self, EncodingError.Context(codingPath: encoder.codingPath, debugDescription: "An item of ',
+                            tupleName,
+                            ' follows a missing optional item"))',
+                        ),
+                    );
+                }
+
+                this.emitLine("var container = encoder.unkeyedContainer()");
+                t.items.forEach((_, i) => {
+                    if (i < t.minItems) {
+                        this.emitLine(`try container.encode(item${i})`);
+                    } else {
+                        this.emitBlock(`if let x = item${i}`, () =>
+                            this.emitLine("try container.encode(x)"),
+                        );
+                    }
+                });
+                if (t.rest !== undefined) {
+                    this.emitLine("try container.encode(contentsOf: rest)");
+                }
+            },
+        );
     }
 
     protected initializableProperties(c: ClassType): SwiftProperty[] {
@@ -909,41 +1182,35 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
     }
 
     private emitConvenienceInitializersExtension(
-        c: ClassType,
-        className: Name,
+        isClass: boolean,
+        typeName: Name,
+        fields: readonly SwiftField[],
     ): void {
-        const isClass = this._options.useClasses || this.isCycleBreakerType(c);
         const convenience = isClass ? "convenience " : "";
 
-        this.emitBlockWithAccess(["extension ", className], () => {
+        this.emitBlockWithAccess(["extension ", typeName], () => {
             if (isClass) {
                 this.emitBlock("convenience init(data: Data) throws", () => {
-                    if (this.propertyCount(c) > 0) {
-                        this.emitLine(
-                            "let me = try newJSONDecoder().decode(",
-                            this.swiftType(c),
-                            ".self, from: data)",
-                        );
-                    } else {
-                        this.emitLine(
-                            "let _ = try newJSONDecoder().decode(",
-                            this.swiftType(c),
-                            ".self, from: data)",
-                        );
-                    }
+                    this.emitLine(
+                        fields.length > 0 ? "let me" : "let _",
+                        " = try newJSONDecoder().decode(",
+                        typeName,
+                        ".self, from: data)",
+                    );
 
                     const args: Sourcelike[] = [];
-                    this.forEachClassProperty(c, "none", (name) => {
+                    for (const [name] of fields) {
                         if (args.length > 0) args.push(", ");
                         args.push(name, ": ", "me.", name);
-                    });
+                    }
+
                     this.emitLine("self.init(", ...args, ")");
                 });
             } else {
                 this.emitBlock("init(data: Data) throws", () => {
                     this.emitLine(
                         "self = try newJSONDecoder().decode(",
-                        this.swiftType(c),
+                        typeName,
                         ".self, from: data)",
                     );
                 });
@@ -978,7 +1245,7 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
             );
 
             this.ensureBlankLine();
-            this.emitConvenienceMutator(c, className);
+            this.emitConvenienceMutator(typeName, fields);
 
             // Convenience serializers
             this.ensureBlankLine();
@@ -1108,8 +1375,18 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
                             const integerMember = u.findMember("integer");
                             if (integerMember !== undefined)
                                 renderUnionCase(integerMember);
+                            // Tuples are JSON arrays, too.  They're tried
+                            // first: an array that fits a tuple may also fit
+                            // the array.
                             for (const t of nonNulls) {
-                                if (t.kind === "bool" || t.kind === "integer")
+                                if (t instanceof TupleType) renderUnionCase(t);
+                            }
+                            for (const t of nonNulls) {
+                                if (
+                                    t.kind === "bool" ||
+                                    t.kind === "integer" ||
+                                    t.kind === "tuple"
+                                )
                                     continue;
                                 renderUnionCase(t);
                             }
@@ -1602,38 +1879,31 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
         this.endFile();
     };
 
-    private emitConvenienceMutator(c: ClassType, className: Name): void {
+    private emitConvenienceMutator(
+        typeName: Name,
+        fields: readonly SwiftField[],
+    ): void {
+        const separator = (i: number): string =>
+            i < fields.length - 1 ? "," : "";
         this.emitLine("func with(");
         this.indent(() => {
-            this.forEachClassProperty(c, "none", (name, _, p, position) => {
-                this.emitLine(
-                    name,
-                    ": ",
-                    this.swiftPropertyType(p),
-                    "? = nil",
-                    position !== "only" && position !== "last" ? "," : "",
-                );
+            fields.forEach(([name, type], i) => {
+                this.emitLine(name, ": ", type, "? = nil", separator(i));
             });
         });
-        this.emitBlock([") -> ", className], () => {
-            this.emitLine("return ", className, "(");
+        this.emitBlock([") -> ", typeName], () => {
+            this.emitLine("return ", typeName, "(");
             this.indent(() => {
-                this.forEachClassProperty(
-                    c,
-                    "none",
-                    (name, _, _p, position) => {
-                        this.emitLine(
-                            name,
-                            ": ",
-                            name,
-                            " ?? self.",
-                            name,
-                            position !== "only" && position !== "last"
-                                ? ","
-                                : "",
-                        );
-                    },
-                );
+                fields.forEach(([name], i) => {
+                    this.emitLine(
+                        name,
+                        ": ",
+                        name,
+                        " ?? self.",
+                        name,
+                        separator(i),
+                    );
+                });
             });
             this.emitLine(")");
         });
@@ -1656,6 +1926,8 @@ encoder.dateEncodingStrategy = .formatted(formatter)`);
                 this.renderEnumDefinition(e, enumName),
             (u: UnionType, unionName: Name) =>
                 this.renderUnionDefinition(u, unionName),
+            (t: TupleType, tupleName: Name) =>
+                this.renderTupleDefinition(t, tupleName),
         );
 
         if (!this._options.justTypes) {

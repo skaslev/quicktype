@@ -122,6 +122,24 @@ describe("Swift classes with --protocol", () => {
         );
     });
 
+    test("include tuples that are classes", async () => {
+        const output = await renderSwift(
+            {
+                type: "array",
+                items: [{ type: "string" }, { type: "integer" }],
+                minItems: 2,
+                maxItems: 2,
+            },
+            { "struct-or-class": "class", protocol: "hashable" },
+        );
+
+        expect(output).toContain("class TopLevel: Codable, Hashable {");
+        expect(output).toContain(
+            "        return lhs.item0 == rhs.item0 &&\n            lhs.item1 == rhs.item1",
+        );
+        expect(output).toContain("        hasher.combine(self.item1)");
+    });
+
     test("leave structs to the compiler", async () => {
         const output = await renderSwift(point, { protocol: "hashable" });
 

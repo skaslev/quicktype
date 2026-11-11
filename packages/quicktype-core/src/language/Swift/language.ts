@@ -11,6 +11,7 @@ import { TargetLanguage } from "../../TargetLanguage.js";
 import type {
     PrimitiveStringTypeKind,
     TransformedStringTypeKind,
+    TupleSupport,
 } from "../../Type/index.js";
 import type { StringTypeMapping } from "../../Type/TypeBuilderUtils.js";
 import type { LanguageName, RendererOptions } from "../../types.js";
@@ -159,6 +160,12 @@ export class SwiftTargetLanguage extends TargetLanguage<
 
     public get supportsRecursiveUnions(): boolean {
         return true;
+    }
+
+    // Tuples are structs with a property per item, which read and write
+    // JSON arrays in their `init(from:)` and `encode(to:)`.
+    public get tupleSupport(): TupleSupport {
+        return "full";
     }
 
     protected makeRenderer<Lang extends LanguageName = "swift">(

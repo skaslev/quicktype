@@ -55,6 +55,28 @@ describe("Swift cycles through nullable unions", () => {
         expect(output).not.toContain("struct Node");
     });
 
+    test("make a tuple a class when it's reached through the union", async () => {
+        const nullableTuple = {
+            oneOf: [{ $ref: "#/definitions/Pair" }, { type: "null" }],
+        };
+        const output = await renderSwift({
+            type: "object",
+            properties: { root: nullableTuple },
+            required: ["root"],
+            definitions: {
+                Pair: {
+                    type: "array",
+                    items: [{ type: "integer" }, nullableTuple],
+                    minItems: 2,
+                    maxItems: 2,
+                },
+            },
+        });
+
+        expect(output).toContain("class Pair: Codable {");
+        expect(output).not.toContain("struct Pair");
+    });
+
     test("still break a cycle with an indirect enum for a union that isn't nullable", async () => {
         const output = await renderSwift({
             $ref: "#/definitions/Value",

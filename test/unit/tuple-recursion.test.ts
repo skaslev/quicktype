@@ -85,7 +85,6 @@ describe("targets that declare recursive unions", () => {
                 /UnionArrayValue\(val value: List<TopLevelNode>\)/,
             ],
         ],
-        ["swift", ["case leaf(Leaf)", "case unionArray([TopLevelNode])"]],
         ["pike", ["typedef Leaf|array(TopLevelNode) PurpleNode;"]],
         // Unions are `dynamic` and `id`, but the leaves' class is declared.
         ["dart", ["class Leaf {"]],
@@ -101,7 +100,6 @@ describe("targets that declare recursive unions", () => {
     test.each([
         ["csharp", /public TopLevelElement\[\]\? \w+;/],
         ["kotlin", /UnionArrayValue\(val value: List<TopLevelElement>\)/],
-        ["swift", /case unionArray\(\[TopLevelElement\]\)/],
         ["pike", /typedef string\|array\(TopLevelElement\) TopLevelElement;/],
     ] as const)("%s keeps a tuple that is its own item", async (lang, expected) => {
         const output = await renderSchema(lang, chain, justTypes);
