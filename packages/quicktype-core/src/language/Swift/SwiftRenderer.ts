@@ -252,6 +252,9 @@ export class SwiftRenderer extends ConvenienceRenderer {
         this.emitLineOnce(
             "// This file was generated from JSON Schema using quicktype, do not modify it directly.",
         );
+        // Plain types aren't Codable.
+        if (this._options.justTypes) return;
+
         this.emitLineOnce(
             "// To parse the JSON, add this file to your project and do:",
         );

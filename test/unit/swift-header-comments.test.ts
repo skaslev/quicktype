@@ -61,4 +61,18 @@ describe("Swift usage comments", () => {
         expect(output).toContain(convenienceUsage);
         expect(output).toContain("init(_ json: String");
     });
+
+    test("aren't emitted for plain types, which aren't Codable", async () => {
+        const output = await renderSwift(
+            { type: "array", items: point },
+            { "just-types": "true" },
+        );
+
+        expect(output).not.toContain("Codable");
+        expect(output).toContain(
+            "// This file was generated from JSON Schema using quicktype, do not modify it directly.",
+        );
+        expect(output).not.toContain("To parse the JSON");
+        expect(output).not.toContain("let topLevel =");
+    });
 });
