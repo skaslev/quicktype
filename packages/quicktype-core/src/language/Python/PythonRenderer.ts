@@ -610,12 +610,19 @@ export class PythonRenderer extends ConvenienceRenderer {
 
     // A type alias, `Pair = Tuple[str, float]`.  It may refer to itself,
     // quoted: `Node = Tuple[str, List['Node']]`.  pydantic recurses forever
-    // into such an alias, so for pydantic it's a `TypeAliasType`, whose
-    // value is all quoted: `Node = TypeAliasType("Node", "Tuple[str,
-    // List[Node]]")`.  Output without type hints has no use for an alias.
+    // into an alias that refers to itself other than through a model, so
+    // for pydantic such an alias is a `TypeAliasType` (from
+    // typing_extensions, which pydantic 2 depends on), whose value is all
+    // quoted: `Node = TypeAliasType("Node", "Tuple[str, List[Node]]")`.
+    // pydantic 1 takes neither, nor any other spelling of such a type, but
+    // the other aliases are plain, which pydantic 1 and 2 take.  Output
+    // without type hints has no use for an alias.
     protected emitTuple(t: TupleType, tupleName: Name): void {
         if (this.pyOptions.features.typeHints) {
-            if (this.pyOptions.pydanticBaseModel) {
+            if (
+                this.pyOptions.pydanticBaseModel &&
+                this.isInCycleThrough(t, (c) => c.kind !== "class")
+            ) {
                 this.emitLine(
                     tupleName,
                     " = ",

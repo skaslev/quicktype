@@ -239,6 +239,69 @@ describe("named tuples", () => {
         expect(output).toContain("from typing_extensions import TypeAliasType");
     });
 
+    // pydantic 1 takes no TypeAliasType, so only aliases that need one,
+    // those that refer to themselves other than through a model, get one.
+    test("pydantic's other tuple aliases are plain", async () => {
+        const output = await renderSchema(
+            {
+                type: "object",
+                properties: {
+                    score: { ...pair, title: "MemberScore" },
+                    a: { $ref: "#/$defs/A" },
+                },
+                required: ["score", "a"],
+                $defs: {
+                    A: {
+                        type: "object",
+                        properties: {
+                            pair: {
+                                title: "Pair",
+                                type: "array",
+                                items: [
+                                    { type: "string" },
+                                    { $ref: "#/$defs/A" },
+                                ],
+                                minItems: 2,
+                                maxItems: 2,
+                            },
+                        },
+                    },
+                },
+            },
+            { "pydantic-base-model": true, "just-types": true },
+        );
+        expect(output).toContain("MemberScore = tuple[str, float]");
+        expect(output).toContain("Pair = tuple[str, 'A']");
+        expect(output).not.toContain("TypeAliasType");
+    });
+
+    test("pydantic's mutually recursive tuples are TypeAliasTypes", async () => {
+        const tuple = (first: object, other: string) => ({
+            type: "array",
+            items: [first, { type: "array", items: { $ref: other } }],
+            minItems: 2,
+            maxItems: 2,
+        });
+        const output = await renderSchema(
+            {
+                type: "object",
+                properties: { t: { $ref: "#/$defs/Left" } },
+                required: ["t"],
+                $defs: {
+                    Left: tuple({ type: "string" }, "#/$defs/Right"),
+                    Right: tuple({ type: "integer" }, "#/$defs/Left"),
+                },
+            },
+            { "pydantic-base-model": true, "just-types": true },
+        );
+        expect(output).toContain(
+            'Left = TypeAliasType("Left", "tuple[str, list[Right]]")',
+        );
+        expect(output).toContain(
+            'Right = TypeAliasType("Right", "tuple[int, list[Left]]")',
+        );
+    });
+
     test("a recursive tuple's converters call themselves", async () => {
         const output = await renderSchema(node);
         expect(output).toContain(
