@@ -467,8 +467,10 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
             },
         );
         this.ensureBlankLine();
+        // A value receiver, as time.Time has, so that union values marshal
+        // with it, too, not only pointers and addressable values.
         this.emitFunc(
-            ["(x *", unionName, ") MarshalJSON() ([]byte, error)"],
+            ["(x ", unionName, ") MarshalJSON() ([]byte, error)"],
             () => {
                 const args = makeArgs(
                     (fn) => ["x.", fn],
