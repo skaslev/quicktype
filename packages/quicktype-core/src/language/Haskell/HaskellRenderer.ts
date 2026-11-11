@@ -37,6 +37,10 @@ function haskellStringEscape(s: string): string {
     );
 }
 
+// The kinds of JSON values, aeson's `Value` constructors: Object, Array,
+// String, Number, Bool and Null.
+const valueKindCount = 6;
+
 export class HaskellRenderer extends ConvenienceRenderer {
     public constructor(
         targetLanguage: TargetLanguage,
@@ -359,10 +363,17 @@ export class HaskellRenderer extends ConvenienceRenderer {
         this.emitLine("instance FromJSON ", className, " where");
 
         this.indent(() => {
+            // `withObject` fails on other JSON values, where a pattern
+            // match on `Object` would throw.
+            const withObject = [
+                'parseJSON = withObject "',
+                className,
+                '" $ \\',
+            ];
             if (this.classPropertyLength(c) === 0) {
-                this.emitLine("parseJSON (Object _) = return ", className);
+                this.emitLine(withObject, "_ -> return ", className);
             } else {
-                this.emitLine("parseJSON (Object v) = ", className);
+                this.emitLine(withObject, "v -> ", className);
                 this.indent(() => {
                     let onFirst = true;
                     this.forEachClassProperty(c, "none", (_, jsonName, p) => {
@@ -418,6 +429,11 @@ export class HaskellRenderer extends ConvenienceRenderer {
                             this.enumCaseName(name, enumName),
                         );
                     });
+                    this.emitLine(
+                        'parseText invalid = fail ("expected ',
+                        enumName,
+                        ', but encountered " ++ show invalid)',
+                    );
                 });
             });
         });
@@ -443,21 +459,35 @@ export class HaskellRenderer extends ConvenienceRenderer {
     }
 
     private emitUnionDecoderInstance(u: UnionType, unionName: Name): void {
+        // The kinds of JSON values the members take, the constructors of
+        // `Value` they match.
+        const kinds = new Set<string>();
         this.emitLine("instance FromJSON ", unionName, " where");
         this.indent(() => {
             this.forEachUnionMember(u, null, "none", null, (name, t) => {
                 if (t.kind === "null") {
+                    kinds.add("Null");
                     this.emitLine("parseJSON Null = return ", name);
                 } else {
+                    const kind = this.encoderNameForType(t).source;
+                    kinds.add(this.sourcelikeToString(kind));
                     this.emitLine(
                         "parseJSON xs@(",
-                        this.encoderNameForType(t).source,
+                        kind,
                         " _) = (fmap ",
                         name,
                         " . parseJSON) xs",
                     );
                 }
             });
+            // Fail on the other kinds, instead of throwing.
+            if (kinds.size < valueKindCount) {
+                this.emitLine(
+                    'parseJSON invalid = typeMismatch "',
+                    unionName,
+                    '" invalid',
+                );
+            }
         });
     }
 
@@ -502,7 +532,7 @@ export class HaskellRenderer extends ConvenienceRenderer {
             });
             this.ensureBlankLine();
             this.emitMultiline(`import Data.Aeson
-import Data.Aeson.Types (emptyObject)
+import Data.Aeson.Types (emptyObject, typeMismatch)
 import Data.ByteString.Lazy (ByteString)
 import Data.HashMap.Strict (HashMap)
 import Data.Text (Text)`);
