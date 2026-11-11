@@ -155,6 +155,12 @@ export class FlowTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    // flow-bin 0.66, which the fixtures use, has tuple types but neither
+    // optional tuple elements nor a spread in them.
+    public get tupleSupport(): TupleSupport {
+        return "fixed";
+    }
+
     protected makeRenderer<Lang extends LanguageName = "flow">(
         renderContext: RenderContext,
         untypedOptionValues: RendererOptions<Lang>,
