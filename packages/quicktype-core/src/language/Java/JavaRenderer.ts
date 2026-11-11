@@ -390,13 +390,9 @@ export class JavaRenderer extends ConvenienceRenderer {
             (mapType) => [...this.javaImport(mapType.values), "java.util.Map"],
             (_enumType) => [],
             (unionType) => {
-                const imports: string[] = [];
-                unionType.members.forEach((type) => {
-                    this.javaImport(type).forEach((imp) => {
-                        imports.push(imp);
-                    });
-                });
-                return imports;
+                const nullable = nullableFromUnion(unionType);
+                if (nullable !== null) return this.javaImport(nullable);
+                return [];
             },
             (transformedStringType) => {
                 if (transformedStringType.kind === "time") {
