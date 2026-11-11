@@ -909,7 +909,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     this.nameForNamedType(unionType),
                 ];
             },
-            (_transformedStringType) => this._stringType.getType(),
+            // uuid and date-time are strings, too.
+            (_transformedStringType) => {
+                if (forceNarrowString) {
+                    return "std::string";
+                }
+
+                return this._stringType.getType();
+            },
         );
         if (!isOptional) return typeSource;
         return [this.optionalType(t), "<", typeSource, ">"];
