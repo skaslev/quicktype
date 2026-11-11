@@ -2848,6 +2848,87 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitLine("#endif");
     }
 
+    // nlohmann/json reads a std::tuple from the first elements of an array,
+    // so it takes longer arrays, and it takes a number for an integer,
+    // rounding it.  This adl_serializer checks the array's length and the
+    // integer items, also where unions try tuples.
+    protected emitTupleHelpers(): void {
+        this.emitLine("#ifndef NLOHMANN_TUPLE_HELPER");
+        this.emitLine("#define NLOHMANN_TUPLE_HELPER");
+
+        this.emitNamespaces(["nlohmann"], () => {
+            this.emitLine("template <typename... T>");
+            this.emitBlock(
+                ["struct adl_serializer<std::tuple<T...>>"],
+                true,
+                () => {
+                    this.emitBlock(
+                        [
+                            "static void to_json(json & j, ",
+                            this.withConst("std::tuple<T...>"),
+                            " & t)",
+                        ],
+                        false,
+                        () => {
+                            this.emitLine("j = json::array();");
+                            this.emitLine(
+                                "std::apply([&j](",
+                                this.withConst("T"),
+                                " &... e) { (j.push_back(e), ...); }, t);",
+                            );
+                        },
+                    );
+                    this.ensureBlankLine();
+                    this.emitBlock(
+                        [
+                            "static std::tuple<T...> from_json(",
+                            this.withConst("json"),
+                            " & j)",
+                        ],
+                        false,
+                        () => {
+                            this.emitLine(
+                                'if (!j.is_array() || j.size() != sizeof...(T)) throw std::runtime_error("Expected an array of " + std::to_string(sizeof...(T)) + " elements");',
+                            );
+                            this.emitLine(
+                                "return get_items(j, std::index_sequence_for<T...>());",
+                            );
+                        },
+                    );
+                    this.ensureBlankLine();
+                    this.emitLine("template <std::size_t... I>");
+                    this.emitBlock(
+                        [
+                            "static std::tuple<T...> get_items(",
+                            this.withConst("json"),
+                            " & j, std::index_sequence<I...>)",
+                        ],
+                        false,
+                        () => {
+                            this.emitLine(
+                                "return std::tuple<T...>{get_item<T>(j[I])...};",
+                            );
+                        },
+                    );
+                    this.ensureBlankLine();
+                    this.emitLine("template <typename U>");
+                    this.emitBlock(
+                        ["static U get_item(", this.withConst("json"), " & j)"],
+                        false,
+                        () => {
+                            this.emitLine(
+                                'if (std::is_same<U, int64_t>::value && !j.is_number_integer()) throw std::runtime_error("Expected integer");',
+                            );
+                            this.emitLine("return j.get<U>();");
+                        },
+                    );
+                },
+            );
+        });
+
+        this.emitLine("#endif");
+    }
+
     protected emitDeclaration(decl: Declaration): void {
         if (decl.kind === "forward") {
             if (this._options.codeFormat && !(decl.type instanceof TupleType)) {
@@ -3568,6 +3649,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             this.emitOptionalHelpers();
         }
 
+        if (this.haveTuples) {
+            this.ensureBlankLine();
+            this.emitTupleHelpers();
+        }
+
         this.finishFile();
     }
 
@@ -3725,6 +3811,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
 
         if (!this._options.justTypes && this.haveOptionals) {
             this.emitOptionalHelpers();
+            this.ensureBlankLine();
+        }
+
+        if (!this._options.justTypes && this.haveTuples) {
+            this.emitTupleHelpers();
             this.ensureBlankLine();
         }
 

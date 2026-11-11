@@ -1,7 +1,12 @@
 // nlohmann/json converts std::tuple to and from JSON arrays, so C++ keeps
 // fixed-length tuples.  Other tuple shapes stay arrays of a union.
 
-import { InputData, JSONSchemaInput, quicktype } from "quicktype-core";
+import {
+    InputData,
+    JSONSchemaInput,
+    quicktype,
+    quicktypeMultiFile,
+} from "quicktype-core";
 import { expect, test } from "vitest";
 
 async function renderSchema(
@@ -180,4 +185,54 @@ test("wide strings convert tuples item by item", async () => {
     expect(output).toContain(
         "Utf16_Utf8<std::tuple<std::string, double>, std::tuple<std::wstring, double>>::convert(",
     );
+});
+
+// nlohmann/json reads a std::tuple from the first elements of an array, and
+// an integer from any number, rounding it, so the tuple helper's
+// adl_serializer checks both, also where unions try tuples.
+const tupleSerializer = "struct adl_serializer<std::tuple<T...>>";
+
+test("tuples are read with a length and integer check", async () => {
+    const output = await renderSchema({
+        type: "array",
+        items: [{ type: "string" }, { type: "integer" }],
+    });
+    expect(output).toContain(tupleSerializer);
+    expect(output).toContain(
+        'if (!j.is_array() || j.size() != sizeof...(T)) throw std::runtime_error("Expected an array of " + std::to_string(sizeof...(T)) + " elements");',
+    );
+    expect(output).toContain(
+        'if (std::is_same<U, int64_t>::value && !j.is_number_integer()) throw std::runtime_error("Expected integer");',
+    );
+});
+
+test("the tuple helper is in the multi-source helper header", async () => {
+    const schemaInput = new JSONSchemaInput(undefined);
+    await schemaInput.addSource({
+        name: "TopLevel",
+        schema: JSON.stringify({
+            type: "object",
+            properties: { pair },
+            required: ["pair"],
+        }),
+    });
+    const inputData = new InputData();
+    inputData.addInput(schemaInput);
+    const result = await quicktypeMultiFile({
+        inputData,
+        lang: "cplusplus",
+        outputFilename: "TopLevel.hpp",
+        rendererOptions: { "source-style": "multi-source" },
+    });
+    expect(result.get("helper.hpp")?.lines.join("\n")).toContain(
+        tupleSerializer,
+    );
+});
+
+test("just-types output has no tuple helper", async () => {
+    const output = await renderSchema(
+        { type: "array", items: pair },
+        justTypes,
+    );
+    expect(output).not.toContain(tupleSerializer);
 });
