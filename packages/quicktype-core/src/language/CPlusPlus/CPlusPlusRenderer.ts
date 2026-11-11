@@ -1895,7 +1895,12 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                         value,
                         ";",
                     ];
-                    if (p.isOptional && this._options.hideNullOptional) {
+                    // An absent optional property that isn't nullable
+                    // can't be written as null: from_json rejects that.
+                    if (
+                        p.isOptional &&
+                        (this._options.hideNullOptional || !propType.isNullable)
+                    ) {
                         const condition =
                             propType.kind === "null" || propType.kind === "any"
                                 ? ["!", value, ".is_null()"]
