@@ -297,7 +297,9 @@ export class JavaLegacyDateTimeProvider extends JavaDateTimeProvider {
                         });
                     },
                 );
-                this._renderer.emitLine("return null;");
+                this._renderer.emitLine(
+                    'throw new IllegalArgumentException("Cannot parse date or time: " + str);',
+                );
             },
         );
 

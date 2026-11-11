@@ -144,3 +144,25 @@ test("time zone offsets are read with their minutes", async () => {
         ].join("\n"),
     );
 });
+
+// `parseAllDateTimeString` returned null for a string no format reads, so a
+// date-time property took an invalid string as null.  Like the java8
+// provider's parsers it throws now.
+test("an invalid date or time is rejected", async () => {
+    const converter = file(
+        await renderJava(withUnion("date-time")),
+        "Converter.java",
+    );
+    expect(converter).toContain(
+        [
+            "        for (String format : DATE_TIME_FORMATS) {",
+            "            try {",
+            "                return utcDateFormat(format).parse(str);",
+            "            } catch (Exception ex) {",
+            "                // Ignored",
+            "            }",
+            "        }",
+            '        throw new IllegalArgumentException("Cannot parse date or time: " + str);',
+        ].join("\n"),
+    );
+});
