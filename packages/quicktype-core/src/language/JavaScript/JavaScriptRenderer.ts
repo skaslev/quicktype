@@ -215,16 +215,32 @@ export class JavaScriptRenderer extends ConvenienceRenderer {
         );
     }
 
+    // The tuple's shape allows at least `minItems` elements and, without a
+    // rest, at most one per item.  The schema's `minItems` and `maxItems`
+    // can bound the length further: require some of the rest elements, or
+    // allow more of them than become optional items.
     private typeMapTypeForTuple(t: TupleType): Sourcelike {
         const items = t.items.map((item) => this.typeMapTypeFor(item));
+        const [minItems, maxItems] = minMaxItemsForType(t) ?? [];
+        const min = Math.max(t.minItems, minItems ?? 0);
+        const max =
+            maxItems !== undefined &&
+            (t.rest !== undefined || maxItems < t.items.length)
+                ? maxItems
+                : undefined;
         const rest =
-            t.rest === undefined ? "" : [", ", this.typeMapTypeFor(t.rest)];
+            t.rest === undefined
+                ? max === undefined
+                    ? ""
+                    : ", undefined"
+                : [", ", this.typeMapTypeFor(t.rest)];
         return [
             "tu([",
             ...arrayIntercalate(", ", items),
             "], ",
-            t.minItems.toString(),
+            min.toString(),
             rest,
+            max === undefined ? "" : [", ", max.toString()],
             ")",
         ];
     }
@@ -548,7 +564,7 @@ ${
     function transformTuple(typ${anyAnnotation}, val${anyAnnotation})${anyAnnotation} {
         // val must be an array with an element of the right type in each position
         const items = typ.tupleItems;
-        if (!Array.isArray(val) || val.length < typ.min || (typ.rest === undefined && val.length > items.length)) return invalidValue(l("array"), val, key, parent);
+        if (!Array.isArray(val) || val.length < typ.min || (typ.rest === undefined && val.length > items.length) || (typ.max !== undefined && val.length > typ.max)) return invalidValue(l("array"), val, key, parent);
         return val.map((el${anyAnnotation}, i${anyAnnotation}) => transform(el, i < items.length ? items[i] : typ.rest, getProps));
     }
 `
@@ -648,8 +664,8 @@ function n(typ${anyAnnotation}, min${anyAnnotation}, max${anyAnnotation}) {
 
 ${
     hasTuples
-        ? `function tu(items${anyArrayAnnotation}, min${anyAnnotation}, rest${anyAnnotation} = undefined) {
-    return { tupleItems: items, min, rest };
+        ? `function tu(items${anyArrayAnnotation}, min${anyAnnotation}, rest${anyAnnotation} = undefined, max${anyAnnotation} = undefined) {
+    return { tupleItems: items, min, rest, max };
 }
 
 `

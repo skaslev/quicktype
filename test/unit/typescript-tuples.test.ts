@@ -156,6 +156,55 @@ test("runtime checks validate tuples", async () => {
     expect(output).toContain("function transformTuple(");
 });
 
+// The tuple type only expresses `minItems` up to the positional items, and
+// `maxItems` up to a few optional ones.
+test.each([
+    [
+        "minItems above the positional items",
+        {
+            type: "array",
+            prefixItems: [{ type: "string" }],
+            items: { type: "integer" },
+            minItems: 3,
+        },
+        'tu([""], 3, i(0))',
+    ],
+    [
+        "maxItems above the optional items",
+        {
+            type: "array",
+            prefixItems: [{ type: "string" }],
+            items: { type: "integer" },
+            maxItems: 10,
+        },
+        'tu([""], 1, i(0), 10)',
+    ],
+    [
+        "maxItems below the positional items",
+        {
+            type: "array",
+            prefixItems: [
+                { type: "string" },
+                { type: "integer" },
+                { type: "integer" },
+            ],
+            items: false,
+            minItems: 1,
+            maxItems: 2,
+        },
+        'tu(["", i(0), i(0)], 1, undefined, 2)',
+    ],
+] as const)("runtime checks enforce the schema's bounds: %s", async (_, tuple, expected) => {
+    const output = await renderSchema({
+        type: "object",
+        properties: { tuple },
+        required: ["tuple"],
+        additionalProperties: false,
+    });
+    expect(output).toContain(`typ: ${expected}`);
+    expect(output).toContain("(typ.max !== undefined && val.length > typ.max)");
+});
+
 test("runtime checks for output without tuples are unchanged", async () => {
     const output = await renderSchema({
         type: "object",
