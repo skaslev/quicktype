@@ -62,6 +62,13 @@ export class PhpRenderer extends ConvenienceRenderer {
 
     private _haveEmittedLeadingComments = false;
 
+    private readonly _recursiveUnions = new Map<UnionType, boolean>();
+
+    // The recursive union whose helper class is being written: its
+    // conversions are spelled out once, in the helper, and call the helper
+    // where the union occurs again.  See `convertsWithHelper`.
+    private _unionToSpellOut: UnionType | undefined;
+
     protected readonly _converterClassname: string = "Converter";
 
     protected readonly _converterKeywords: string[] = [];
@@ -104,10 +111,53 @@ export class PhpRenderer extends ConvenienceRenderer {
         return this.getNameStyling("enumCaseNamingFunction");
     }
 
-    protected unionNeedsName(_u: UnionType): boolean {
-        // Unions are represented inline as PHP union type declarations;
-        // no named type is ever emitted for them.
-        return false;
+    protected unionNeedsName(u: UnionType): boolean {
+        // Unions are represented inline as PHP union type declarations,
+        // with their conversions spelled out where they're used.  That's
+        // impossible for a union that contains itself through arrays and
+        // maps, e.g. `Node = string | Node[]`: it gets a class of static
+        // conversion helpers instead (`emitUnionDefinition`).
+        return this.unionIsRecursive(u);
+    }
+
+    // Whether a union contains itself through types other than classes and
+    // enums, whose conversions are their own classes' methods.
+    private unionIsRecursive(u: UnionType): boolean {
+        let recursive = this._recursiveUnions.get(u);
+        if (recursive === undefined) {
+            recursive = false;
+            const seen = new Set<Type>();
+            const work = Array.from(u.getNonAttributeChildren());
+            for (let t = work.pop(); t !== undefined; t = work.pop()) {
+                if (t === u) {
+                    recursive = true;
+                    break;
+                }
+
+                if (seen.has(t) || ["class", "object", "enum"].includes(t.kind))
+                    continue;
+                seen.add(t);
+                work.push(...t.getNonAttributeChildren());
+            }
+
+            this._recursiveUnions.set(u, recursive);
+        }
+
+        return recursive;
+    }
+
+    // Whether the conversion of `t` is a call of its helper class's method.
+    private convertsWithHelper(t: Type): t is UnionType {
+        if (!(t instanceof UnionType) || !this.unionIsRecursive(t)) {
+            return false;
+        }
+
+        if (this._unionToSpellOut === t) {
+            this._unionToSpellOut = undefined;
+            return false;
+        }
+
+        return true;
     }
 
     protected namedTypeToNameForTopLevel(type: Type): Type | undefined {
@@ -601,6 +651,17 @@ export class PhpRenderer extends ConvenienceRenderer {
         lhs: Sourcelike[],
         args: Sourcelike[],
     ): void {
+        if (this.convertsWithHelper(t)) {
+            this.emitLine(
+                ...lhs,
+                this.nameForNamedType(t),
+                "::to(",
+                ...args,
+                ");",
+            );
+            return;
+        }
+
         matchType(
             t,
             (_anyType) => this.emitLine(...lhs, ...args, "; /*any*/"),
@@ -717,6 +778,17 @@ export class PhpRenderer extends ConvenienceRenderer {
         lhs: Sourcelike[],
         args: Sourcelike[],
     ): void {
+        if (this.convertsWithHelper(t)) {
+            this.emitLine(
+                ...lhs,
+                this.nameForNamedType(t),
+                "::from(",
+                ...args,
+                ");",
+            );
+            return;
+        }
+
         matchType(
             t,
             (_anyType) => this.emitLine(...lhs, ...args, "; /*any*/"),
@@ -821,6 +893,16 @@ export class PhpRenderer extends ConvenienceRenderer {
         idx: number,
         suffix: Sourcelike,
     ): void {
+        if (this.convertsWithHelper(t)) {
+            this.emitLine(
+                ...lhs,
+                this.nameForNamedType(t),
+                "::sample()",
+                suffix,
+            );
+            return;
+        }
+
         matchType(
             t,
             (_anyType) =>
@@ -1024,6 +1106,16 @@ export class PhpRenderer extends ConvenienceRenderer {
         scopeAttrName: string,
         skipPrimitiveTypeCheck = false,
     ): void {
+        if (this.convertsWithHelper(t)) {
+            this.emitLine(
+                this.nameForNamedType(t),
+                "::validate(",
+                scopeAttrName,
+                ");",
+            );
+            return;
+        }
+
         const validateRange = (type: Type): void => {
             const [min, max] = minMaxValueForType(type) ?? [];
             if (min !== undefined)
@@ -1734,8 +1826,99 @@ export class PhpRenderer extends ConvenienceRenderer {
         // empty
     }
 
-    protected emitUnionDefinition(_u: UnionType, _unionName: Name): void {
-        throw new Error("emitUnionDefinition not implemented");
+    // The conversions of a union that contains itself, which call these
+    // where it occurs again.
+    protected emitUnionDefinition(u: UnionType, unionName: Name): void {
+        this.emitFileHeader(unionName, []);
+        this.emitDescription(this.descriptionForType(u));
+        const jsonType = this.phpConvertType(unionName, u);
+        const phpType = this.phpType(false, u);
+        const method = (
+            doc: Sourcelike[],
+            signature: Sourcelike[],
+            body: () => void,
+        ): void => {
+            this.ensureBlankLine();
+            this.emitLine("/**");
+            for (const line of doc) this.emitLine(" * ", line);
+            this.emitLine(" */");
+            this.emitBlock(["public static function ", ...signature], () => {
+                this._unionToSpellOut = u;
+                body();
+                this._unionToSpellOut = undefined;
+            });
+        };
+
+        this.emitBlock(["class ", unionName], () => {
+            method(
+                [
+                    ["@param ", jsonType, " $value"],
+                    "@throws Exception",
+                    ["@return ", phpType],
+                ],
+                ["from(", jsonType, " $value): ", phpType],
+                () =>
+                    this.phpFromObjConvert(
+                        unionName,
+                        u,
+                        ["return "],
+                        ["$value"],
+                    ),
+            );
+            method(
+                [
+                    ["@param ", phpType, " $value"],
+                    "@throws Exception",
+                    ["@return ", jsonType],
+                ],
+                ["to(", phpType, " $value): ", jsonType],
+                () =>
+                    this.phpToObjConvert(unionName, u, ["return "], ["$value"]),
+            );
+            method(
+                [
+                    ["@param ", phpType, " $value"],
+                    "@return bool",
+                    "@throws Exception",
+                ],
+                ["validate(", phpType, " $value): bool"],
+                () => {
+                    this.phpValidate(unionName, u, "", "$value");
+                    this.emitLine("return true;");
+                },
+            );
+            method([["@return ", phpType]], ["sample(): ", phpType], () => {
+                // A member whose sample doesn't need the union's again,
+                // preferably.
+                const { members, nullType } = this.sortedUnionMembers(u);
+                const rank = (t: Type): number =>
+                    t instanceof ArrayType || t instanceof MapType
+                        ? 2
+                        : t.kind === "class"
+                          ? 1
+                          : 0;
+                const member = [...members].sort(
+                    (a, b) => rank(a) - rank(b),
+                )[0];
+                if (
+                    member === undefined ||
+                    (rank(member) === 2 && nullType !== null)
+                ) {
+                    this.emitLine("return null;");
+                } else {
+                    this._unionToSpellOut = undefined;
+                    this.phpSampleConvert(
+                        unionName,
+                        member,
+                        ["return "],
+                        [],
+                        0,
+                        ";",
+                    );
+                }
+            });
+        });
+        this.finishFile();
     }
 
     protected emitEnumSerializationAttributes(_e: EnumType): void {
