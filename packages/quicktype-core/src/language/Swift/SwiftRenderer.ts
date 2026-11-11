@@ -257,9 +257,16 @@ export class SwiftRenderer extends ConvenienceRenderer {
         );
         this.emitLineOnce("//");
         this.forEachTopLevel("none", (t, topLevelName) => {
+            // Classes have convenience initializers, and so do top-level
+            // arrays and maps, but enums, unions (also nullable ones, which
+            // are optionals) and primitive types don't.
             if (
                 this._options.convenienceInitializers &&
-                !(t instanceof EnumType)
+                !(
+                    t instanceof EnumType ||
+                    t instanceof UnionType ||
+                    t.isPrimitive()
+                )
             ) {
                 this.emitLineOnce(
                     "//   let ",
