@@ -3,7 +3,7 @@ import {
     nullTypeIssueAnnotation,
 } from "../../Annotation.js";
 import { ConvenienceRenderer } from "../../ConvenienceRenderer.js";
-import { DependencyName, type Name, type Namer } from "../../Naming.js";
+import { DependencyName, Name, type Namer } from "../../Naming.js";
 import type { RenderContext } from "../../Renderer.js";
 import type { OptionValues } from "../../RendererOptions/index.js";
 import { type Sourcelike, maybeAnnotated, modifySource } from "../../Source.js";
@@ -37,6 +37,12 @@ export class GoRenderer extends ConvenienceRenderer {
     private readonly _topLevelUnmarshalNames = new Map<Name, Name>();
 
     private _currentFilename: string | undefined;
+
+    private _namedTopLevelNames: ReadonlySet<Name> | undefined;
+
+    // The top-level whose type the current file is for, in multi-file output,
+    // until `emitPackageDefinitons` has emitted its comments and functions.
+    private _currentFileTopLevel: Name | undefined;
 
     public constructor(
         targetLanguage: TargetLanguage,
@@ -125,6 +131,31 @@ export class GoRenderer extends ConvenienceRenderer {
         );
         this._currentFilename = `${this.sourcelikeToString(basename)}.go`;
         this.initializeEmitContextForFilename(this._currentFilename);
+        this._currentFileTopLevel =
+            basename instanceof Name &&
+            !this._options.justTypes &&
+            !this._options.justTypesAndPackage &&
+            this.namedTopLevelNames.has(basename)
+                ? basename
+                : undefined;
+    }
+
+    // The top-levels that are classes, enums or unions, which have the names
+    // of their types.  In multi-file output, such a top-level is in its
+    // type's file, which would otherwise be written twice, the second time
+    // with the type's own imports after the top-level's functions.
+    private get namedTopLevelNames(): ReadonlySet<Name> {
+        if (this._namedTopLevelNames === undefined) {
+            const names = new Set<Name>();
+            this.forEachTopLevel("none", (t, name) => {
+                if (this.namedTypeToNameForTopLevel(t) !== undefined) {
+                    names.add(name);
+                }
+            });
+            this._namedTopLevelNames = names;
+        }
+
+        return this._namedTopLevelNames;
     }
 
     /// endFile pushes the current file name onto the collection of finished files and then resets the current file name. These finished files are used in index.ts to write the output.
@@ -227,6 +258,15 @@ export class GoRenderer extends ConvenienceRenderer {
     }
 
     private emitTopLevel(t: Type, name: Name): void {
+        // In multi-file output, a top-level that is a named type is in the
+        // type's file, see `startFile`.
+        if (
+            this._options.multiFileOutput &&
+            this.namedTypeToNameForTopLevel(t) !== undefined
+        ) {
+            return;
+        }
+
         this.startFile(name);
 
         if (
@@ -234,26 +274,7 @@ export class GoRenderer extends ConvenienceRenderer {
             this._options.justTypes === false &&
             this._options.justTypesAndPackage === false
         ) {
-            if (this.leadingComments !== undefined) {
-                this.emitComments(this.leadingComments);
-            } else {
-                this.emitLineOnce(
-                    "// Code generated from JSON Schema using quicktype. DO NOT EDIT.",
-                );
-                this.emitLineOnce(
-                    "// To parse and unparse this JSON data, add this code to your project and do:",
-                );
-                this.emitLineOnce("//");
-                const ref = modifySource(camelCase, name);
-                this.emitLineOnce(
-                    "//    ",
-                    ref,
-                    ", err := ",
-                    defined(this._topLevelUnmarshalNames.get(name)),
-                    "(bytes)",
-                );
-                this.emitLineOnce("//    bytes, err = ", ref, ".Marshal()");
-            }
+            this.emitTopLevelComments(name);
         }
 
         const imports =
@@ -264,7 +285,6 @@ export class GoRenderer extends ConvenienceRenderer {
                   : undefined;
         this.emitPackageDefinitons(true, imports);
 
-        const unmarshalName = defined(this._topLevelUnmarshalNames.get(name));
         if (this.namedTypeToNameForTopLevel(t) === undefined) {
             this.emitLine("type ", name, " ", this.goType(t));
         }
@@ -272,6 +292,37 @@ export class GoRenderer extends ConvenienceRenderer {
         if (this._options.justTypes || this._options.justTypesAndPackage)
             return;
 
+        this.emitTopLevelFunctions(name);
+        this.endFile();
+    }
+
+    // The comments at the start of a top-level's file in multi-file output.
+    private emitTopLevelComments(name: Name): void {
+        if (this.leadingComments !== undefined) {
+            this.emitComments(this.leadingComments);
+            return;
+        }
+
+        this.emitLineOnce(
+            "// Code generated from JSON Schema using quicktype. DO NOT EDIT.",
+        );
+        this.emitLineOnce(
+            "// To parse and unparse this JSON data, add this code to your project and do:",
+        );
+        this.emitLineOnce("//");
+        const ref = modifySource(camelCase, name);
+        this.emitLineOnce(
+            "//    ",
+            ref,
+            ", err := ",
+            defined(this._topLevelUnmarshalNames.get(name)),
+            "(bytes)",
+        );
+        this.emitLineOnce("//    bytes, err = ", ref, ".Marshal()");
+    }
+
+    private emitTopLevelFunctions(name: Name): void {
+        const unmarshalName = defined(this._topLevelUnmarshalNames.get(name));
         this.ensureBlankLine();
         this.emitFunc(
             [unmarshalName, "(data []byte) (", name, ", error)"],
@@ -285,7 +336,6 @@ export class GoRenderer extends ConvenienceRenderer {
         this.emitFunc(["(r *", name, ") Marshal() ([]byte, error)"], () => {
             this.emitLine("return json.Marshal(r)");
         });
-        this.endFile();
     }
 
     private emitClass(c: ClassType, className: Name): void {
@@ -507,6 +557,15 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
         includeJSONEncodingImport: boolean,
         imports: Set<string> = new Set<string>(),
     ): void {
+        // The file of a top-level's type in multi-file output, see
+        // `startFile`, starts with the top-level's comments, and its
+        // functions follow the imports.
+        const topLevel = this._currentFileTopLevel;
+        this._currentFileTopLevel = undefined;
+        if (topLevel !== undefined) {
+            this.emitTopLevelComments(topLevel);
+        }
+
         if (!this._options.justTypes || this._options.justTypesAndPackage) {
             this.ensureBlankLine();
             const packageDeclaration = `package ${this._options.packageName}`;
@@ -523,12 +582,16 @@ func (x *${type}) UnmarshalJSON(data []byte) error {
                 imports.add("errors");
             }
 
-            if (includeJSONEncodingImport) {
+            if (includeJSONEncodingImport || topLevel !== undefined) {
                 imports.add("encoding/json");
             }
         }
 
         this.emitImports(imports);
+        if (topLevel !== undefined) {
+            this.emitTopLevelFunctions(topLevel);
+            this.ensureBlankLine();
+        }
     }
 
     private emitImports(imports: Set<string>): void {
