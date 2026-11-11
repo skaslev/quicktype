@@ -114,3 +114,31 @@ describe("a union of types of the same kind", () => {
         ).toEqual({ type: "number" });
     });
 });
+
+describe("a union that keeps several arrays apart", () => {
+    test("keeps only the constraints all arrays of one member have", async () => {
+        const output = await render(
+            "typescript",
+            {
+                oneOf: [
+                    { ...strings, minItems: 1 },
+                    strings,
+                    {
+                        type: "array",
+                        items: {
+                            title: "MemberScore",
+                            type: "object",
+                            properties: { m: { type: "string" } },
+                            required: ["m"],
+                            additionalProperties: false,
+                        },
+                    },
+                ],
+            },
+            { "just-types": true },
+        );
+        expect(output).toContain(
+            "export type TopLevel = string[] | MemberScore[];",
+        );
+    });
+});

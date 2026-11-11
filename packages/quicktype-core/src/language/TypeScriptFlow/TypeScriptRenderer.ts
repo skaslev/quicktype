@@ -1,5 +1,3 @@
-import { arrayIntercalate } from "collection-utils";
-
 import { minMaxItemsForType } from "../../attributes/Constraints.js";
 import type { Name } from "../../Naming.js";
 import {
@@ -11,7 +9,7 @@ import {
 } from "../../Source.js";
 import { camelCase, utf16StringEscape } from "../../support/Strings.js";
 import {
-    type ArrayType,
+    ArrayType,
     type ClassType,
     EnumType,
     ObjectType,
@@ -29,7 +27,37 @@ import { tsFlowTypeAnnotations } from "./utils.js";
 // array type.
 const maxSpelledOutMinItems = 16;
 
+// Whether values of `t` are checked against classes: if it's one, or a
+// union or an array of one.
+function hasClasses(t: Type, seen: Set<Type> = new Set()): boolean {
+    if (seen.has(t)) return false;
+    seen.add(t);
+
+    if (t instanceof ObjectType) return true;
+    if (t instanceof ArrayType) return hasClasses(t.items, seen);
+    if (t instanceof UnionType) {
+        return Array.from(t.members).some((m) => hasClasses(m, seen));
+    }
+
+    return false;
+}
+
+// Whether a union keeps classes apart: if it has several, or several arrays
+// of classes.
+function keepsClassesApart(u: UnionType): boolean {
+    const members = Array.from(u.members);
+    return (
+        members.filter((m) => m instanceof ObjectType).length > 1 ||
+        members.filter((m) => m instanceof ArrayType && hasClasses(m.items))
+            .length > 1
+    );
+}
+
 export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
+    // Whether the type map type of a union that keeps classes apart is being
+    // made, see `typeMapTypeFor`.
+    private _inUnionOfClasses = false;
+
     protected get emptyObjectType(): string {
         return "object";
     }
@@ -45,21 +73,30 @@ export class TypeScriptRenderer extends TypeScriptFlowBaseRenderer {
     // A union only keeps classes apart that don't allow additional
     // properties, so an empty one only takes empty objects here.  Checking
     // it as any object, like other empty classes, would also take the values
-    // of the other classes.
+    // of the other classes.  The same goes for the classes of the arrays a
+    // union keeps apart, which their elements are checked against.
     protected typeMapTypeFor(t: Type): Sourcelike {
-        if (!(t instanceof UnionType)) return super.typeMapTypeFor(t);
+        if (
+            this._inUnionOfClasses &&
+            this.emptyObjectTypeFor(t) !== undefined
+        ) {
+            return "o([], false)";
+        }
 
-        const members = Array.from(t.getChildren());
-        if (members.filter((m) => m instanceof ObjectType).length < 2) {
+        if (
+            !(t instanceof UnionType) ||
+            this._inUnionOfClasses ||
+            !keepsClassesApart(t)
+        ) {
             return super.typeMapTypeFor(t);
         }
 
-        const children = members.map((m) =>
-            this.emptyObjectTypeFor(m) === undefined
-                ? this.typeMapTypeFor(m)
-                : "o([], false)",
-        );
-        return ["u(", ...arrayIntercalate(", ", children), ")"];
+        this._inUnionOfClasses = true;
+        try {
+            return super.typeMapTypeFor(t);
+        } finally {
+            this._inUnionOfClasses = false;
+        }
     }
 
     // An array with `minItems` >= 1 becomes a tuple that spells out the

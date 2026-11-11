@@ -92,6 +92,10 @@ export class TypeScriptTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsUnionsWithMultipleArrays(): boolean {
+        return true;
+    }
+
     public get supportsFullObjectType(): boolean {
         return true;
     }

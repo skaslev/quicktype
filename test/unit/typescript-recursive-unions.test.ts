@@ -42,7 +42,8 @@ const node = {
     },
 };
 
-// `R = R[] | string[]`: the two arrays are merged into one of `R | string`.
+// `R = R[] | string[]`: TypeScript keeps the two arrays apart, Flow and the
+// JavaScript type map merge them into one of `R | string`.
 const arrays = {
     $ref: "#/$defs/r",
     $defs: {
@@ -89,10 +90,12 @@ describe.each(["typescript", "flow"] as const)("%s", (lang) => {
         [
             "R = R[] | string[]",
             arrays,
-            [
-                "export type TopLevel = Array<TopLevelElement>;",
-                "export type TopLevelElement = Array<TopLevelElement> | string;",
-            ],
+            lang === "typescript"
+                ? ["export type TopLevel = Array<TopLevel> | string[];"]
+                : [
+                      "export type TopLevel = Array<TopLevelElement>;",
+                      "export type TopLevelElement = Array<TopLevelElement> | string;",
+                  ],
         ],
         [
             "a nullable union",
@@ -162,8 +165,10 @@ describe.each([
         [
             "R = R[] | string[]",
             arrays,
-            ['"TopLevelElement": u(a(r("TopLevelElement")), ""),'],
-            'a(r("TopLevelElement"))',
+            lang === "typescript"
+                ? ['"TopLevel": u(a(r("TopLevel")), a("")),']
+                : ['"TopLevelElement": u(a(r("TopLevelElement")), ""),'],
+            lang === "typescript" ? 'r("TopLevel")' : 'a(r("TopLevelElement"))',
         ],
         [
             "a nullable union",
