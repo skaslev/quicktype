@@ -433,6 +433,7 @@ export class GoRenderer extends ConvenienceRenderer {
         this.indent(() => this.emitTable(columns));
         this.emitLine(")");
         const type = this.sourcelikeToString(enumName);
+        // Plain types have no methods, and no encoding/json import for them.
         if (
             this._options.justTypes ||
             this._options.justTypesAndPackage ||
