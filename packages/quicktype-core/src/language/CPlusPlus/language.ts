@@ -140,6 +140,10 @@ export class CPlusPlusTargetLanguage extends TargetLanguage<
         return true;
     }
 
+    public get supportsUnionsWithMultipleArrays(): boolean {
+        return true;
+    }
+
     public get supportsOptionalClassProperties(): boolean {
         return true;
     }

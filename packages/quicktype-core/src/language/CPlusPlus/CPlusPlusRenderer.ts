@@ -4,6 +4,7 @@ import {
     iterableFirst,
     iterableSome,
     setUnion,
+    setUnionInto,
     toReadonlyArray,
     withDefault,
 } from "collection-utils";
@@ -100,6 +101,24 @@ function expectedTupleLength(min: number, max: number | undefined): string {
     return min === 0
         ? `an array of at most ${elements(max)}`
         : `an array of ${min} to ${max} elements`;
+}
+
+// The classes the elements of `t` are checked against, if it's an array: its
+// items, if they are classes, or the classes of their arrays and unions.
+function itemClasses(t: Type, seen: Set<Type>): Set<ClassType> {
+    const classes = new Set<ClassType>();
+    if (seen.has(t)) return classes;
+    seen.add(t);
+
+    if (t instanceof ClassType) {
+        classes.add(t);
+    } else if (t instanceof ArrayType) {
+        setUnionInto(classes, itemClasses(t.items, seen));
+    } else if (t instanceof UnionType) {
+        for (const m of t.members) setUnionInto(classes, itemClasses(m, seen));
+    }
+
+    return classes;
 }
 
 export class CPlusPlusRenderer extends ConvenienceRenderer {
@@ -337,10 +356,11 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
         return classes.sort((a, b) => requiredCount(b) - requiredCount(a));
     }
 
-    // Whether `c` is one of several classes of a union.  A union only has
-    // several if they don't allow additional properties, so their
-    // `from_json` rejects unknown properties, and only takes values of its
-    // own class.
+    // Whether `c` is one of several classes of a union, or a class of one of
+    // several arrays of classes of a union.  A union only keeps classes
+    // apart, or arrays of classes, if they don't allow additional
+    // properties, so their `from_json` rejects unknown properties, and only
+    // takes values of its own class.
     private isUnionClass(c: ClassType): boolean {
         if (this._unionClasses === undefined) {
             const unionClasses = new Set<Type>();
@@ -349,12 +369,191 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                 for (const m of this.unionClassesInTryOrder(t.members) ?? []) {
                     unionClasses.add(m);
                 }
+
+                const arrayClasses = (this.unionArrays(t.members) ?? [])
+                    .map((a) => itemClasses(a, new Set()))
+                    .filter((s) => s.size > 0);
+                if (arrayClasses.length >= 2) {
+                    for (const s of arrayClasses) setUnionInto(unionClasses, s);
+                }
             }
 
             this._unionClasses = unionClasses;
         }
 
         return this._unionClasses.has(c);
+    }
+
+    // The arrays of a union with several, which its `from_json` tries in
+    // turn, in the order of the variant.  An array only takes a JSON array
+    // whose elements are all of its items, see `arrayCheck`, and a union
+    // only keeps arrays apart whose items can be told apart, so two arrays
+    // only take the same JSON array if it's empty, or if its elements are
+    // objects valid for classes of both, as with an `anyOf`, or invalid only
+    // in a way that isn't checked, such as an unknown key in a nested
+    // object.  The empty array is taken by the first array, which encodes it
+    // back as it was.
+    private unionArrays(members: ReadonlySet<Type>): ArrayType[] | undefined {
+        const arrays = Array.from(members).filter(
+            (t): t is ArrayType => t instanceof ArrayType,
+        );
+        return arrays.length < 2 ? undefined : arrays;
+    }
+
+    // Whether the `from_json` of a union with several arrays checks the
+    // elements of one, with `std::all_of`.
+    private get haveUnionArrayChecks(): boolean {
+        return iterableSome(this.namedUnions, (u) =>
+            (this.unionArrays(u.members) ?? []).some(
+                (a) => this.arrayCheck(a, "j", 0, new Set()) !== undefined,
+            ),
+        );
+    }
+
+    // A condition on the JSON array `j` that its elements are of the items of
+    // `a`, in the ways `j.get` doesn't check, or `undefined` if there are
+    // none.  nlohmann's `get` takes a number for an integer, rounding it, and
+    // a boolean for a number, so the elements of arrays of numbers are
+    // checked, also those in nested arrays and tuples, and its `get` of a
+    // std::tuple takes longer arrays, so their length is checked.  Classes,
+    // strings and booleans check their values themselves, and so do unions,
+    // except for the elements of their one array, if they have one and no
+    // tuples.
+    private arrayCheck(
+        a: ArrayType,
+        j: string,
+        depth: number,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        const e = depth === 0 ? "e" : `e${depth}`;
+        const condition = this.elementCheck(a.items, e, depth + 1, seen);
+        if (condition === undefined) return undefined;
+        return [
+            "std::all_of(",
+            j,
+            ".begin(), ",
+            j,
+            ".end(), [](",
+            this.withConst("json"),
+            " & ",
+            e,
+            ") { return ",
+            condition,
+            "; })",
+        ];
+    }
+
+    private elementCheck(
+        t: Type,
+        e: string,
+        depth: number,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        if (t.kind === "integer") return [e, ".is_number_integer()"];
+        if (t.kind === "double") return [e, ".is_number()"];
+        if (t.kind === "null") return [e, ".is_null()"];
+        if (t instanceof ArrayType) return this.arrayCheck(t, e, depth, seen);
+        if (t instanceof TupleType && !seen.has(t)) {
+            return this.tupleCheck(t, e, depth, new Set([...seen, t]));
+        }
+
+        if (!(t instanceof UnionType) || seen.has(t)) return undefined;
+
+        const [maybeNull, nonNulls] = removeNullFromUnion(t);
+        if (nonNulls.size === 1) {
+            const condition = this.elementCheck(
+                defined(iterableFirst(nonNulls)),
+                e,
+                depth,
+                seen,
+            );
+            if (condition === undefined || maybeNull === null) {
+                return condition;
+            }
+
+            return [e, ".is_null() || ", condition];
+        }
+
+        // A union with tuples tries them first on an array.
+        if (this.unionArrays(nonNulls) !== undefined) return undefined;
+        if (iterableSome(nonNulls, (m) => m instanceof TupleType)) {
+            return undefined;
+        }
+
+        const array = iterableFind(nonNulls, (m) => m instanceof ArrayType);
+        if (!(array instanceof ArrayType)) return undefined;
+        const condition = this.arrayCheck(
+            array,
+            e,
+            depth,
+            new Set([...seen, t]),
+        );
+        if (condition === undefined) return undefined;
+        return ["!", e, ".is_array() || ", condition];
+    }
+
+    // The elements of a tuple are checked like those of an array, and the
+    // length of a std::tuple, too; a struct checks its own length.
+    private tupleCheck(
+        t: TupleType,
+        e: string,
+        depth: number,
+        seen: ReadonlySet<Type>,
+    ): Sourcelike | undefined {
+        const conditions: Sourcelike[] = [];
+        const parenthesized = (c: Sourcelike): Sourcelike =>
+            this.sourcelikeToString(c).includes("||") ? ["(", c, ")"] : c;
+        t.items.forEach((item, i) => {
+            const c = this.elementCheck(item, `${e}[${i}]`, depth + 1, seen);
+            if (c === undefined) return;
+            conditions.push(
+                i < t.minItems
+                    ? parenthesized(c)
+                    : ["(", e, ".size() <= ", i.toString(), " || ", c, ")"],
+            );
+        });
+        if (t.rest !== undefined) {
+            const r = `e${depth + 1}`;
+            const c = this.elementCheck(t.rest, r, depth + 2, seen);
+            if (c !== undefined) {
+                const n = t.items.length.toString();
+                conditions.push([
+                    "(",
+                    e,
+                    ".size() <= ",
+                    n,
+                    " || std::all_of(",
+                    e,
+                    ".begin() + ",
+                    n,
+                    ", ",
+                    e,
+                    ".end(), [](",
+                    this.withConst("json"),
+                    " & ",
+                    r,
+                    ") { return ",
+                    c,
+                    "; }))",
+                ]);
+            }
+        }
+
+        if (conditions.length === 0 && !t.isFixedLength) return undefined;
+        const length = t.isFixedLength
+            ? [[e, ".size() == ", t.items.length.toString()]]
+            : [];
+        const minimum = t.isFixedLength ? t.items.length : t.minItems;
+        const guard: Sourcelike[] =
+            t.isFixedLength || minimum === 0
+                ? []
+                : [[e, ".size() >= ", minimum.toString()]];
+        return arrayIntercalate<Sourcelike>(" && ", [
+            [e, ".is_array()"],
+            ...length,
+            ...guard,
+            ...conditions,
+        ]);
     }
 
     private recursiveUnionUsesStackOptional(u: UnionType): boolean {
@@ -3037,6 +3236,19 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                     );
                 };
 
+                const emitTry = (t: Type): void => {
+                    this.emitLine("try {");
+                    this.indent(() => {
+                        emitAssignment(t);
+                        this.emitLine("return;");
+                    });
+                    this.emitLine(
+                        "} catch (",
+                        this.withConst("std::exception"),
+                        " &) {}",
+                    );
+                };
+
                 // Tuples are arrays, too.  The tuples of a union have
                 // different shapes, so where the lengths they allow don't
                 // overlap, the length tells them apart.  But an array of a
@@ -3069,22 +3281,14 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                         iterableSome(nonNulls, (t) => t instanceof ArrayType));
                 if (tryTuples) {
                     for (const [t, condition] of tupleCases) {
-                        this.emitBlock(["if (", condition, ")"], false, () => {
-                            this.emitLine("try {");
-                            this.indent(() => {
-                                emitAssignment(t);
-                                this.emitLine("return;");
-                            });
-                            this.emitLine(
-                                "} catch (",
-                                this.withConst("std::exception"),
-                                " &) {}",
-                            );
-                        });
+                        this.emitBlock(["if (", condition, ")"], false, () =>
+                            emitTry(t),
+                        );
                     }
                 }
 
                 const classes = this.unionClassesInTryOrder(nonNulls);
+                const arrays = this.unionArrays(nonNulls);
                 const cases: Array<[Type, Sourcelike]> = [];
                 for (const [kind, func] of functionForKind) {
                     if (kind === "array" && !tryTuples) {
@@ -3113,15 +3317,35 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
                         // Each class only takes values of its own.
                         this.emitBlock(condition, false, () => {
                             for (const c of classes) {
-                                this.emitLine("try {");
-                                this.indent(() => {
-                                    emitAssignment(c);
-                                    this.emitLine("return;");
-                                });
-                                this.emitLine(
-                                    "} catch (",
-                                    this.withConst("std::exception"),
-                                    " &) {}",
+                                emitTry(c);
+                            }
+
+                            this.emitLine(
+                                'throw std::runtime_error("Could not deserialise!");',
+                            );
+                        });
+                        continue;
+                    }
+
+                    if (typeForKind.kind === "array" && arrays !== undefined) {
+                        // Each array only takes arrays of its own items.
+                        this.emitBlock(condition, false, () => {
+                            for (const a of arrays) {
+                                const check = this.arrayCheck(
+                                    a,
+                                    "j",
+                                    0,
+                                    new Set(),
+                                );
+                                if (check === undefined) {
+                                    emitTry(a);
+                                    continue;
+                                }
+
+                                this.emitBlock(
+                                    ["if (", check, ")"],
+                                    false,
+                                    () => emitTry(a),
                                 );
                             }
 
@@ -4261,7 +4485,10 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             }
         }
 
-        if (this.haveConstraintClasses) {
+        if (
+            this.haveConstraintClasses ||
+            (!this._options.justTypes && this.haveUnionArrayChecks)
+        ) {
             this.emitInclude(true, "algorithm");
         }
 
